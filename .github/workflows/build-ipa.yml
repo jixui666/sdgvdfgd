@@ -1,0 +1,77 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          df -h /
+
+      - name: List schemes
+        run: xcodebuild -project uuvpn.xcodeproj -list
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -project uuvpn.xcodeproj -scheme SFI -resolvePackageDependencies
+
+      - name: Build .app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project uuvpn.xcodeproj \
+            -scheme SFI \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee xcodebuild.log
+
+      - name: Package IPA (unsigned)
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: no .app produced" >&2
+            ls -R build/Build/Products || true
+            exit 1
+          fi
+          echo "app: $APP"
+          # 内嵌的 apptrace / libapptracecore 需要可执行位
+          chmod +x "$APP"/Frameworks/*.framework/* 2>/dev/null || true
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry uuvpn-unsigned.ipa Payload
+          rm -rf Payload
+          ls -lh uuvpn-unsigned.ipa
+          unzip -l uuvpn-unsigned.ipa | grep -E 'Frameworks/|links.txt' || true
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: uuvpn-unsigned-ipa
+          path: uuvpn-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore

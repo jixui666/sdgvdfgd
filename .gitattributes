@@ -1,0 +1,2 @@
+# 保留原始字节，避免 Xcode 工程 / xcframework 在 Windows 上被 CRLF 转换破坏
+* -text

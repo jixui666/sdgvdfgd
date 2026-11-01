@@ -1,0 +1,21 @@
+# Xcode / SPM 构建产物
+.build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+
+# 系统文件
+.DS_Store
+._*
+Thumbs.db
+
+# 本地环境
+*.log
