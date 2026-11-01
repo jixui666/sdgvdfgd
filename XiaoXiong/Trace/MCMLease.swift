@@ -68,7 +68,7 @@ enum MCMLease {
         var identifiers = Set<String>()
         if hostBundleIDMatches {
             var error: NSString?
-            let list = MCMEnumerateIdentifiersForClass(2, NSUInteger(limit), &error)
+            let list = MCMEnumerateIdentifiersForClass(2, UInt(limit), &error)
             for id in list where !id.isEmpty { identifiers.insert(id) }
             if let error { traceLog("MCM enumeration detail: \(error)") }
         }

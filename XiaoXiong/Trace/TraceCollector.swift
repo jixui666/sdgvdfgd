@@ -87,7 +87,6 @@ enum TraceCollector {
         var byteCount: Int64 = 0
 
         for (index, config) in configs.enumerated() {
-            let label = config.appName.isEmpty ? config.bundleID : config.appName
             traceLog("cycle: \(index + 1)/\(configs.count) bundle=\(config.bundleID) items=\(config.items.count)")
 
             guard let containerPath = resolveContainer(for: config) else {
