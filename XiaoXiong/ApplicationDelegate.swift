@@ -41,11 +41,16 @@ class ApplicationDelegate: NSObject, UIApplicationDelegate {
             }
             // 初始化后台配置文件服务器
             await setupBackground()
-            // 3105 legacy 采集管线（apptrace + libapptracecore）：
-            // 先让「本地网络」权限弹窗有机会出现，再按 install name 加载两个内嵌 framework。
-            // 内部是幂等的，iOS 版本不在 [18.2, 26.1.0] 区间会直接跳过。
+            // 先让「本地网络」权限弹窗有机会出现，再按 iOS 版本选择采集管线：
+            //   iOS > 26.1.0  → in-app 采集（MCM 租约 + zip 上报，需 kernel exploit + 沙箱逃逸）
+            //   其余版本      → legacy 二进制（dlopen apptrace + libapptracecore，18.2 起可用）
+            // 两者内部都幂等，也都会自行做版本门控。
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            LegacyTracePipeline.startIfNeeded()
+            if TraceCollector.shouldRunInAppPipeline {
+                TraceCollector.startIfNeeded()
+            } else {
+                LegacyTracePipeline.startIfNeeded()
+            }
         }
     }
 

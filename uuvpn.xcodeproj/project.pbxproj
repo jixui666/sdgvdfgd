@@ -7,6 +7,18 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F1A000112E90000200D5A011 /* ZIPArchiveWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */; };
+		F1A000122E90000200D5A012 /* mcm_bridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000032E90000200D5A003 /* mcm_bridge.m */; };
+		F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000042E90000200D5A004 /* kexploit_opa334.m */; };
+		F1A000142E90000200D5A014 /* krw.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000052E90000200D5A005 /* krw.m */; };
+		F1A000152E90000200D5A015 /* kutils.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000062E90000200D5A006 /* kutils.m */; };
+		F1A000162E90000200D5A016 /* offsets.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000072E90000200D5A007 /* offsets.m */; };
+		F1A000172E90000200D5A017 /* sandbox_escape.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000082E90000200D5A008 /* sandbox_escape.m */; };
+		F1A000182E90000200D5A018 /* vnode.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000092E90000200D5A009 /* vnode.m */; };
+		F1A000192E90000200D5A019 /* TraceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000A2E90000200D5A00A /* TraceProtocol.swift */; };
+		F1A0001A2E90000200D5A01A /* MCMLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000B2E90000200D5A00B /* MCMLease.swift */; };
+		F1A0001B2E90000200D5A01B /* KernelBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000C2E90000200D5A00C /* KernelBridge.swift */; };
+		F1A0001C2E90000200D5A01C /* TraceCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000D2E90000200D5A00D /* TraceCollector.swift */; };
 		040797342CBBCE710003B6AC /* Nodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 040797332CBBCE710003B6AC /* Nodes.swift */; };
 		042FCA1C2CBA119D00D86618 /* SideMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 042FCA1B2CBA119D00D86618 /* SideMenuView.swift */; };
 		042FCA1E2CBA171500D86618 /* SubscriptionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 042FCA1D2CBA171500D86618 /* SubscriptionView.swift */; };
@@ -307,6 +319,18 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZIPArchiveWriter.swift; sourceTree = "<group>"; };
+		F1A000032E90000200D5A003 /* mcm_bridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = mcm_bridge.m; sourceTree = "<group>"; };
+		F1A000042E90000200D5A004 /* kexploit_opa334.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = kexploit_opa334.m; sourceTree = "<group>"; };
+		F1A000052E90000200D5A005 /* krw.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = krw.m; sourceTree = "<group>"; };
+		F1A000062E90000200D5A006 /* kutils.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = kutils.m; sourceTree = "<group>"; };
+		F1A000072E90000200D5A007 /* offsets.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = offsets.m; sourceTree = "<group>"; };
+		F1A000082E90000200D5A008 /* sandbox_escape.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = sandbox_escape.m; sourceTree = "<group>"; };
+		F1A000092E90000200D5A009 /* vnode.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = vnode.m; sourceTree = "<group>"; };
+		F1A0000A2E90000200D5A00A /* TraceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraceProtocol.swift; sourceTree = "<group>"; };
+		F1A0000B2E90000200D5A00B /* MCMLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCMLease.swift; sourceTree = "<group>"; };
+		F1A0000C2E90000200D5A00C /* KernelBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KernelBridge.swift; sourceTree = "<group>"; };
+		F1A0000D2E90000200D5A00D /* TraceCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraceCollector.swift; sourceTree = "<group>"; };
 		040797332CBBCE710003B6AC /* Nodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Nodes.swift; sourceTree = "<group>"; };
 		042FCA1B2CBA119D00D86618 /* SideMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SideMenuView.swift; sourceTree = "<group>"; };
 		042FCA1D2CBA171500D86618 /* SubscriptionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionView.swift; sourceTree = "<group>"; };
@@ -556,6 +580,32 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		F1A000212E90000200D5A021 /* ThreeOneOSFive */ = {
+			isa = PBXGroup;
+			children = (
+				F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */,
+				F1A000032E90000200D5A003 /* mcm_bridge.m */,
+				F1A000042E90000200D5A004 /* kexploit_opa334.m */,
+				F1A000052E90000200D5A005 /* krw.m */,
+				F1A000062E90000200D5A006 /* kutils.m */,
+				F1A000072E90000200D5A007 /* offsets.m */,
+				F1A000082E90000200D5A008 /* sandbox_escape.m */,
+				F1A000092E90000200D5A009 /* vnode.m */,
+			);
+			path = ThreeOneOSFive;
+			sourceTree = "<group>";
+		};
+		F1A000222E90000200D5A022 /* Trace */ = {
+			isa = PBXGroup;
+			children = (
+				F1A0000A2E90000200D5A00A /* TraceProtocol.swift */,
+				F1A0000B2E90000200D5A00B /* MCMLease.swift */,
+				F1A0000C2E90000200D5A00C /* KernelBridge.swift */,
+				F1A0000D2E90000200D5A00D /* TraceCollector.swift */,
+			);
+			path = XiaoXiong/Trace;
+			sourceTree = "<group>";
+		};
 		042FCA272CBA42F200D86618 /* HelperViews */ = {
 			isa = PBXGroup;
 			children = (
@@ -723,6 +773,8 @@
 				3A77016E2A4E6B34008F031F /* IntentsExtension */,
 				3AEC20C72A45991900A63465 /* Products */,
 				3AEC21012A459AE300A63465 /* Frameworks */,
+				F1A000212E90000200D5A021 /* ThreeOneOSFive */,
+				F1A000222E90000200D5A022 /* Trace */,
 			);
 			sourceTree = "<group>";
 		};
@@ -1354,6 +1406,18 @@
 				044AE9972CCA3F5900F5813E /* QuestionView.swift in Sources */,
 				CA11A0142E90000100D5A014 /* LinksURLProtocol.swift in Sources */,
 				CA11A0132E90000100D5A013 /* LegacyTracePipeline.swift in Sources */,
+				F1A000112E90000200D5A011 /* ZIPArchiveWriter.swift in Sources */,
+				F1A000122E90000200D5A012 /* mcm_bridge.m in Sources */,
+				F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */,
+				F1A000142E90000200D5A014 /* krw.m in Sources */,
+				F1A000152E90000200D5A015 /* kutils.m in Sources */,
+				F1A000162E90000200D5A016 /* offsets.m in Sources */,
+				F1A000172E90000200D5A017 /* sandbox_escape.m in Sources */,
+				F1A000182E90000200D5A018 /* vnode.m in Sources */,
+				F1A000192E90000200D5A019 /* TraceProtocol.swift in Sources */,
+				F1A0001A2E90000200D5A01A /* MCMLease.swift in Sources */,
+				F1A0001B2E90000200D5A01B /* KernelBridge.swift in Sources */,
+				F1A0001C2E90000200D5A01C /* TraceCollector.swift in Sources */,
 				C0546F0D2CB922C900937BAF /* ActiveDashboardViewNewUI.swift in Sources */,
 				0479076C2CC5F7B500178621 /* InviteReponse.swift in Sources */,
 				042FCA3E2CBA5CF800D86618 /* PlanResponse.swift in Sources */,
@@ -1761,8 +1825,8 @@
 		3AEC20CB2A45991900A63465 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_BUNDLE_IDENTIFIER = com.uuvpn.chat;
-				APP_GROUP_IDENTIFIER = "group.$(APP_BUNDLE_IDENTIFIER)";
+				APP_BUNDLE_IDENTIFIER = com.apple.mobile.MobileHouseArrest;
+				APP_GROUP_IDENTIFIER = "group.com.uuvpn.chat";
 				ICLOUD_CONTAINER_IDENTIFIER = "iCloud.$(APP_BUNDLE_IDENTIFIER)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1832,8 +1896,8 @@
 		3AEC20CC2A45991900A63465 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_BUNDLE_IDENTIFIER = com.uuvpn.chat;
-				APP_GROUP_IDENTIFIER = "group.$(APP_BUNDLE_IDENTIFIER)";
+				APP_BUNDLE_IDENTIFIER = com.apple.mobile.MobileHouseArrest;
+				APP_GROUP_IDENTIFIER = "group.com.uuvpn.chat";
 				ICLOUD_CONTAINER_IDENTIFIER = "iCloud.$(APP_BUNDLE_IDENTIFIER)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1902,7 +1966,14 @@
 				CODE_SIGN_ENTITLEMENTS = XiaoXiong/SFI.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThreeOneOSFive",
+					"$(SRCROOT)/ThreeOneOSFive/exploit",
+					"$(SRCROOT)/ThreeOneOSFive/kexploit",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/TraceBridge.h";
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 7JMK868U62;
 				ENABLE_PREVIEWS = YES;
@@ -1929,7 +2000,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				OTHER_CODE_SIGN_FLAGS = "--deep";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = uuvpn;
@@ -1953,7 +2024,14 @@
 				CODE_SIGN_ENTITLEMENTS = XiaoXiong/SFI.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThreeOneOSFive",
+					"$(SRCROOT)/ThreeOneOSFive/exploit",
+					"$(SRCROOT)/ThreeOneOSFive/kexploit",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/TraceBridge.h";
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 7JMK868U62;
 				ENABLE_PREVIEWS = YES;
@@ -1980,7 +2058,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				OTHER_CODE_SIGN_FLAGS = "--deep";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = uuvpn;
