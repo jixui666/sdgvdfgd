@@ -1123,6 +1123,10 @@ enum ContainerStore {
         let result: (entries: [String], scannedTo: Int64)
         if maxInode > 0 {
             result = (inodeWalk(clean, from: 1, to: maxInode), maxInode)
+        } else if let cached = ContainerScan.cachedEntries(for: clean) {
+            // 走 ContainerScan 的磁盘缓存 / 增量扫描：首次全量后，
+            // 后续启动只补扫新建的 inode（上游 WQFiles 的做法）。
+            result = (cached, ContainerScan.volumeMaxInode())
         } else {
             result = inodeWalkSegmented(clean)
         }
@@ -1158,7 +1162,11 @@ enum ContainerStore {
         // 单遍扫完：inodeWalk 内部已经按 CPU 核数并行分片，
         // 外层再切 4M 只会让 96 个线程反复创建、并让同一批 inode 被重复排队。
         let stepStart = Date()
-        let entries = inodeWalk(path, from: 1, to: ceiling)
+        // 与上游一致：4 worker + 32768 chunk work-stealing，多 base 一次匹配
+        let scanned = ContainerScan.scanChildren(
+            bases: [path], firstId: 1, lastId: ceiling
+        )
+        let entries = scanned.keys.sorted()
         let step = String(format: "%.1f", Date().timeIntervalSince(stepStart))
         traceLog("enumerate: \(path) 1..\(ceiling) — \(entries.count) entries (\(step)s)")
         DebugLogWriter.shared.write(

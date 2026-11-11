@@ -17,6 +17,7 @@
 		F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */; };
 		F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */; };
 		F1A000FB2E90000200D5A0FB /* DebugLogWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */; };
+		F1A0010B2E90000200D5A10B /* ContainerScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0010C2E90000200D5A10C /* ContainerScan.swift */; };
 		F1A001012E90000200D5A101 /* ContainerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001022E90000200D5A102 /* ContainerStore.swift */; };
 		F1A001032E90000200D5A103 /* ContainerBrowserLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */; };
 		F1A001052E90000200D5A105 /* PatchPathValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001062E90000200D5A106 /* PatchPathValidator.swift */; };
@@ -342,6 +343,7 @@
 		F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/UserlandAccess.swift; sourceTree = SOURCE_ROOT; };
 		F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/ExploitPolicy.swift; sourceTree = SOURCE_ROOT; };
 		F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/DebugLogWriter.swift; sourceTree = SOURCE_ROOT; };
+		F1A0010C2E90000200D5A10C /* ContainerScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/ContainerScan.swift; sourceTree = SOURCE_ROOT; };
 		F1A001022E90000200D5A102 /* ContainerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/ContainerStore.swift; sourceTree = SOURCE_ROOT; };
 		F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/ContainerBrowserLogic.swift; sourceTree = SOURCE_ROOT; };
 		F1A001062E90000200D5A106 /* PatchPathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/PatchPathValidator.swift; sourceTree = SOURCE_ROOT; };
@@ -619,6 +621,7 @@
 				F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */,
 				F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */,
 				F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */,
+				F1A0010C2E90000200D5A10C /* ContainerScan.swift */,
 				F1A001022E90000200D5A102 /* ContainerStore.swift */,
 				F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */,
 				F1A001062E90000200D5A106 /* PatchPathValidator.swift */,
@@ -1453,6 +1456,7 @@
 				F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */,
 				F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */,
 				F1A000FB2E90000200D5A0FB /* DebugLogWriter.swift in Sources */,
+				F1A0010B2E90000200D5A10B /* ContainerScan.swift in Sources */,
 				F1A001012E90000200D5A101 /* ContainerStore.swift in Sources */,
 				F1A001032E90000200D5A103 /* ContainerBrowserLogic.swift in Sources */,
 				F1A001052E90000200D5A105 /* PatchPathValidator.swift in Sources */,
