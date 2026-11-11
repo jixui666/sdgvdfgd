@@ -37,6 +37,15 @@ enum TraceCollector {
         traceLog("in-app pipeline selected for iOS \(TraceAppInfo.osVersion) (build \(TraceAppInfo.buildID))")
         traceLog("MCM bridge available=\(MCMLease.isBridgeAvailable) hostBundleIDMatches=\(MCMLease.hostBundleIDMatches)")
 
+        // 组名必须在签发侧和查询侧一致：签名里有组、但设备上没有它的容器时，
+        // containermanagerd 只回 -6，把它当"这个路径不行"就会把整条链判死。
+        let entitled = UserlandAccess.entitledGroups
+        let usable = UserlandAccess.usableGroups
+        traceLog("userland: groups entitled=\(entitled) usable=\(usable)")
+        if entitled != usable {
+            traceLog("userland: WARNING entitled/usable mismatch — sig=\(entitled) usable=\(usable)；不匹配的组一律不发 token")
+        }
+
         DispatchQueue.global(qos: .utility).async {
             let (maj, min, pat) = TraceAppInfo.osVersionTuple
             if !KernelBridge.hasSandboxAccess {

@@ -30,6 +30,12 @@ enum UserlandAccess {
         worse_query_last_group() ?? "none"
     }
 
+    /// App Group of the last attempt, successful or not. A refusal whose group
+    /// differs from `usableGroups` is a signature problem, not a target problem.
+    static var lastAttemptGroup: String {
+        worse_query_last_attempt_group() ?? "none"
+    }
+
     /// Path covered by the last successful grant (the container that answered).
     static var lastPath: String {
         worse_query_last_path() ?? "none"
@@ -40,6 +46,12 @@ enum UserlandAccess {
         worse_query_entitled_groups()
     }
 
+    /// The entitled groups that actually resolve to a container here. Only these
+    /// can issue a token; granting with any other name answers -6.
+    static var usableGroups: [String] {
+        worse_query_usable_groups()
+    }
+
     static var hasVerifiedAccess: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -47,12 +59,14 @@ enum UserlandAccess {
     }
 
     /// Requests a sandbox extension for `path`. Returns a handle >= 0 on
-    /// success; callers must hand it back to `revoke`.
-    static func grant(_ path: String, createIfMissing: Bool = true) -> Int64 {
+    /// success; callers must hand it back to `revoke`. A grant only reports
+    /// success when the C layer could also open the path, so a non-negative
+    /// handle means the bytes are actually reachable.
+    static func grant(_ path: String, createIfMissing: Bool = false) -> Int64 {
         guard !path.isEmpty else { return -255 }
         let handle = worse_query_grant(path, createIfMissing)
         if handle < 0 {
-            traceLog("userland: grant refused \(path) code=\(handle) group=\(lastGroup) detail=\(lastError)")
+            traceLog("userland: grant refused \(path) code=\(handle) group=\(lastAttemptGroup) detail=\(lastError)")
         }
         return handle
     }
@@ -100,13 +114,13 @@ enum UserlandAccess {
         let started = Date()
         var succeeded = false
         var grantedPath = "none"
-        // Prefer a real container: on 26.6.2 / 27.x a directory *root* answers
-        // with no token (-6) while a container directory is granted, so probing
-        // only roots reports a false negative.
-        // 2/ 没有 3105 的 ContainerStore 索引快照；probeTargets() 已包含全部候选根路径。
+        traceLog("userland: groups entitled=\(entitledGroups) usable=\(usableGroups)")
+        // Every candidate must exist for real: a path that only *looks* grantable
+        // (27.0.1's /var/containers/Data/Application) hands back a token for a
+        // dangling symlink and reports success while nothing is reachable.
         let candidates = probeTargets()
         for candidate in candidates {
-            let handle = grant(candidate)
+            let handle = grant(candidate, createIfMissing: false)
             if handle >= 0 {
                 revoke(handle)
                 succeeded = true
@@ -163,7 +177,7 @@ enum UserlandAccess {
             self.handle = handle
         }
 
-        static func acquire(path: String, createIfMissing: Bool = true) -> RetainedLease? {
+        static func acquire(path: String, createIfMissing: Bool = false) -> RetainedLease? {
             let handle = UserlandAccess.grant(path, createIfMissing: createIfMissing)
             guard handle >= 0 else { return nil }
             return RetainedLease(path: path, handle: handle)

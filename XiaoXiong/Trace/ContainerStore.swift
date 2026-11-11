@@ -88,7 +88,10 @@ enum ContainerStore {
             }
             return ok && isDir.boolValue
         }
-        return existing.isEmpty ? preferred : existing
+        // 只返回真实存在的根。之前 existing 为空时退回 preferred，会把
+        // 27.0.1 上并不存在的 /var/containers/Data/Application 也塞进扫描列表
+        // （probe 假成功 + 每个 root 一次全量 walk 的源头）。
+        return existing
     }
 
     static var systemDataRoots: [String] {
@@ -1112,10 +1115,14 @@ enum ContainerStore {
         }
 
         enumerationLock.lock()
-        if let cached = enumerationCache[clean],
-           Date().timeIntervalSince(cached.at) < enumerationCacheTTL {
-            enumerationLock.unlock()
-            return cached.entries
+        if let cached = enumerationCache[clean] {
+            // 空结果只保留 15s：它多半代表「后台 walk 还没出结果」，而不是
+            // 真的没有容器，所以不能按 120s 把它钉住。
+            let age = Date().timeIntervalSince(cached.at)
+            if age < (cached.entries.isEmpty ? 15 : enumerationCacheTTL) {
+                enumerationLock.unlock()
+                return cached.entries
+            }
         }
         enumerationLock.unlock()
 

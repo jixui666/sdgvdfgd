@@ -253,6 +253,40 @@ enum ContainerScan {
     private static var memoryAt: TimeInterval = 0
     private static let memoryTTL: TimeInterval = 600
 
+    /// 单实例守卫：同一时刻只允许一次 walk。没有它，App Data 和 PluginKit
+    /// 两个 root 会相隔 95ms 各起一次全量扫（38M inode 永远扫不完），
+    /// 缓存落不了盘，每轮都从 inode 1 重来。
+    private static let flightLock = NSLock()
+    private static var flighting = false
+
+    private static func storeMemory(_ result: Result) {
+        memoryLock.lock()
+        memoryResult = result
+        memoryAt = Date().timeIntervalSince1970
+        memoryLock.unlock()
+    }
+
+    private static func selfContainerInode() -> Int64 {
+        guard let documents = NSSearchPathForDirectoriesInDomains(
+            .documentDirectory, .userDomainMask, true
+        ).first else { return 0 }
+        var info = stat()
+        guard stat(documents, &info) == 0 else { return 0 }
+        return Int64(info.st_ino)
+    }
+
+    /// 把一次扫描结果按 base 归位（扫描本身已按 base 匹配，这里只做分派）。
+    private static func merge(
+        _ found: [String: Int64],
+        into roots: inout [String: [String: Int64]]
+    ) {
+        for (path, inode) in found {
+            for base in bases where belongs(path, to: base) {
+                roots[base, default: [:]][path] = inode
+            }
+        }
+    }
+
     static func containerRoots(forceFull: Bool = false) -> Result {
         memoryLock.lock()
         if !forceFull, let cached = memoryResult,
@@ -263,12 +297,27 @@ enum ContainerScan {
         }
         memoryLock.unlock()
 
+        flightLock.lock()
+        if flighting {
+            let snapshot = memoryResult
+            flightLock.unlock()
+            if let snapshot = snapshot {
+                traceLog("scan: walk already running — serving \(snapshot.totalContainers) cached containers")
+                return snapshot
+            }
+            // 冷启动且第一次 walk 还在跑：直接放弃这一轮，让调用方跳过这个
+            // root，而不是再起一次全量扫把窗口耗光。
+            traceLog("scan: walk already running — no snapshot yet, deferring")
+            return Result(roots: [:], probeInode: 0, fullScanAt: 0, didFullScan: false)
+        }
+        flighting = true
+        flightLock.unlock()
+
         let result = scanAndCache(forceFull: forceFull)
 
-        memoryLock.lock()
-        memoryResult = result
-        memoryAt = Date().timeIntervalSince1970
-        memoryLock.unlock()
+        flightLock.lock()
+        flighting = false
+        flightLock.unlock()
         return result
     }
 
@@ -288,37 +337,69 @@ enum ContainerScan {
                     bases: bases, firstId: cache.probe + 1, lastId: ceiling
                 )
                 traceLog("scan: incremental \(cache.probe + 1)..\(ceiling) added=\(fresh.count)")
-                for (path, inode) in fresh {
-                    for base in bases where belongs(path, to: base) {
-                        roots[base, default: [:]][path] = inode
-                    }
-                }
+                merge(fresh, into: &roots)
                 probe = ceiling
                 saveCache(probe: probe, fullAt: cache.fullAt, roots: roots)
             }
-            return Result(
+            let cached = Result(
                 roots: roots, probeInode: probe,
                 fullScanAt: cache.fullAt, didFullScan: false
             )
+            storeMemory(cached)
+            return cached
         }
 
+        // 冷启动：先扫自己容器周边 4M 个 id（系统 app 与后装的 app 都落在这
+        // 附近），立刻落盘给本轮用；剩下的 id 交给后台分窗口补齐。
+        // 一次 1..38M 的单遍扫在 26 秒的采集窗口里永远跑不完，这就是缓存
+        // 从来没写成功的原因。
+        let own = selfContainerInode()
+        let hotLow = own > 0 ? max(1, own - 2_000_000) : 1
+        let hotHigh = own > 0 ? min(ceiling, own + 2_000_000) : min(ceiling, 4_000_000)
         let started = Date()
-        let scanned = scanChildren(bases: bases, firstId: 1, lastId: ceiling)
         var roots: [String: [String: Int64]] = [:]
-        for base in bases {
-            roots[base] = [:]
+        for base in bases { roots[base] = [:] }
+        if hotLow <= hotHigh {
+            merge(scanChildren(bases: bases, firstId: hotLow, lastId: hotHigh), into: &roots)
         }
-        for (path, inode) in scanned {
-            for base in bases where belongs(path, to: base) {
-                roots[base, default: [:]][path] = inode
-            }
-        }
-        let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
-        traceLog("scan: full 1..\(ceiling) — \(scanned.count) containers in \(elapsed)s")
-        saveCache(probe: ceiling, fullAt: now, roots: roots)
-        return Result(
-            roots: roots, probeInode: ceiling, fullScanAt: now, didFullScan: true
+        let hotCount = roots.values.reduce(0) { $0 + $1.count }
+        let hotElapsed = String(format: "%.1f", Date().timeIntervalSince(started))
+        traceLog("scan: hot window \(hotLow)..\(hotHigh) — \(hotCount) containers in \(hotElapsed)s (own=\(own))")
+
+        // fullAt 记成半个周期前：热点快照立刻可用，但全量补齐仍会在下一轮被需要。
+        let partialFullAt = now - fullScanInterval / 2
+        saveCache(probe: hotHigh, fullAt: partialFullAt, roots: roots)
+        let snapshot = Result(
+            roots: roots, probeInode: hotHigh,
+            fullScanAt: partialFullAt, didFullScan: false
         )
+        storeMemory(snapshot)
+
+        let ranges: [(Int64, Int64)] = [(hotHigh + 1, ceiling), (1, hotLow - 1)]
+        DispatchQueue.global(qos: .utility).async {
+            var merged = roots
+            for range in ranges where range.0 <= range.1 {
+                var first = range.0
+                while first <= range.1 {
+                    let last = min(first + 4_000_000 - 1, range.1)
+                    let found = scanChildren(bases: bases, firstId: first, lastId: last)
+                    merge(found, into: &merged)
+                    first = last + 1
+                    // 每 4M 个 id 落一次盘：进程被回收时下一次能从这里接着走。
+                    saveCache(probe: hotHigh, fullAt: partialFullAt, roots: merged)
+                }
+            }
+            let doneAt = Date().timeIntervalSince1970
+            saveCache(probe: ceiling, fullAt: doneAt, roots: merged)
+            let finished = Result(
+                roots: merged, probeInode: ceiling,
+                fullScanAt: doneAt, didFullScan: true
+            )
+            storeMemory(finished)
+            traceLog("scan: background fill finished — \(merged.values.reduce(0) { $0 + $1.count }) containers")
+        }
+
+        return snapshot
     }
 
     /// path 是否是 base 的直接子项（base 可能是 /private/var/... 写法）
@@ -351,7 +432,9 @@ enum ContainerScan {
         let key = bases.first { $0 == lookup || $0 == normalized }
         guard let key, let entries = result.roots[key] else { return nil }
         traceLog("enumerate: \(normalized) served from ContainerScan cache — \(entries.count) entries (full=\(result.didFullScan))")
-        return entries.keys.sorted()
+        // 空结果也要如实返回 []，不能 nil：nil 会让调用方退回自己的 inode walk，
+        // 于是两个 root 又各扫一遍全量。
+        return entries.isEmpty ? [] : entries.keys.sorted()
     }
 
 }
