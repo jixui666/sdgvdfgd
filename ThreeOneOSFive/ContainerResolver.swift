@@ -37,6 +37,9 @@ enum ContainerResolver {
 
     @discardableResult
     static func retainAccess(_ path: String) -> UserlandAccess.RetainedLease? {
+        // 内核沙箱逃逸已生效（17.x-26.6.1）时不需要 userland 扩展，
+        // 也不该去动 App Group 的 Library/Caches 符号链接。
+        if KernelBridge.hasSandboxAccess { return nil }
         let key = canonicalPath(path)
         leaseLock.lock()
         if let existing = retainedLeases[key] {
@@ -55,10 +58,18 @@ enum ContainerResolver {
     }
 
     static func hasRetainedAccess(_ path: String) -> Bool {
+        if KernelBridge.hasSandboxAccess { return true }
         let key = canonicalPath(path)
         leaseLock.lock()
         defer { leaseLock.unlock() }
         return retainedLeases[key] != nil
+    }
+
+    /// 当前设备可用的文件系统访问方式（日志/分支用）
+    static var accessRoute: String {
+        if KernelBridge.hasSandboxAccess { return "kernel" }
+        if UserlandAccess.hasVerifiedAccess { return "userland" }
+        return "none"
     }
 
     static func releaseAllAccess() {
@@ -73,6 +84,7 @@ enum ContainerResolver {
     /// 已经在 retainAccess 里拿过就直接跳过。
     @discardableResult
     static func retainLeases(forExternalPath path: String, depth: Int = 5) -> Bool {
+        if KernelBridge.hasSandboxAccess { return true }
         if hasRetainedAccess(path) { return true }
         var candidates: [String] = []
         var current = path.trimmingCharacters(in: .whitespaces)
