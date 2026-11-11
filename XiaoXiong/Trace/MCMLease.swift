@@ -49,6 +49,7 @@ enum MCMLease {
     /// 26.6.2+ / 27.x：内核路线拿不到容器时，先给容器根目录申请 userland 扩展，
     /// 否则 `contentsOfDirectory` 直接被沙箱拒绝（errno=1）。
     private static var parentLease: UserlandAccess.RetainedLease?
+    private static var parentRoot = "/var/mobile/Containers/Data/Application"
     private static let parentLock = NSLock()
 
     @discardableResult
@@ -56,19 +57,45 @@ enum MCMLease {
         parentLock.lock(); defer { parentLock.unlock() }
         if parentLease != nil { return true }
         if KernelBridge.hasSandboxAccess { return true }
-        let root = "/var/mobile/Containers/Data/Application"
-        guard let lease = UserlandAccess.RetainedLease.acquire(path: root, createIfMissing: false) else {
-            traceLog("userland: parent lease refused — \(UserlandAccess.lastError)")
-            return false
+        // 27.x 实测：/var/containers/Data/Application 能拿到 token，
+        // /var/mobile/Containers/Data/Application 返回 -6（no sandbox token）。
+        // 两个都试，谁成功用谁。
+        for root in ["/var/containers/Data/Application",
+                     "/var/mobile/Containers/Data/Application"] {
+            if let lease = UserlandAccess.RetainedLease.acquire(path: root, createIfMissing: false) {
+                parentLease = lease
+                parentRoot = root
+                traceLog("userland: parent lease ok — \(root)")
+                return true
+            }
+            traceLog("userland: parent lease refused \(root) — \(UserlandAccess.lastError)")
         }
-        parentLease = lease
-        traceLog("userland: parent lease ok — \(root)")
-        return true
+        return false
     }
 
     /// 兜底：沙箱逃逸（或 userland 扩展）生效后直接扫容器目录里的 MCM 元数据
     static func scanContainerPath(bundleID: String) -> String? {
         _ = ensureParentAccess()
+        let roots = [parentRoot, "/var/containers/Data/Application",
+                     "/var/mobile/Containers/Data/Application"]
+        for root in roots {
+            guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root) else { continue }
+            for uuid in entries {
+                let container = (root as NSString).appendingPathComponent(uuid)
+                let metadata = (container as NSString)
+                    .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: metadata)),
+                      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                      (plist["MCMMetadataIdentifier"] as? String) == bundleID else { continue }
+                traceLog("filesystem scan resolved \(bundleID) -> \(container)")
+                return container
+            }
+        }
+        return nil
+    }
+
+    /// 旧实现（保留以备对照）
+    private static func scanContainerPathLegacy(bundleID: String) -> String? {
         let root = "/var/mobile/Containers/Data/Application"
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root) else { return nil }
         for uuid in entries {
