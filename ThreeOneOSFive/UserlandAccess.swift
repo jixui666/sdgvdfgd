@@ -103,10 +103,8 @@ enum UserlandAccess {
         // Prefer a real container: on 26.6.2 / 27.x a directory *root* answers
         // with no token (-6) while a container directory is granted, so probing
         // only roots reports a false negative.
-        var candidates = probeTargets()
-        if let indexed = ContainerStore.containerIndexSnapshot().values.first {
-            candidates.insert(indexed, at: 0)
-        }
+        // 2/ 没有 3105 的 ContainerStore 索引快照；probeTargets() 已包含全部候选根路径。
+        let candidates = probeTargets()
         for candidate in candidates {
             let handle = grant(candidate)
             if handle >= 0 {
@@ -148,7 +146,7 @@ enum UserlandAccess {
     /// Filesystem access is either the kernel sandbox escape (<= 26.6.1) or the
     /// userland extension route.
     static var isAvailable: Bool {
-        if KernelExploit.hasSandboxAccess() { return true }
+        if KernelBridge.hasSandboxAccess { return true }
         return probe()
     }
 
