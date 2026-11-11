@@ -157,10 +157,16 @@ enum ContainerScan {
         let workers = max(1, min(4, max(1, cores / 2)))
 
         // 每个 chunk 结果写自己那一格，不同 index 互不重叠
+        // [String: Int64] 是值类型但共享 CoW 存储，initialize(repeating:) 会让所有
+        // 格子指向同一份空存储，并发写入触发 CoW 竞态。逐格初始化。
         let buffer = UnsafeMutablePointer<[String: Int64]>.allocate(capacity: chunkCount)
-        buffer.initialize(repeating: [:], count: chunkCount)
+        for index in 0..<chunkCount {
+            buffer.advanced(by: index).initialize(to: [:])
+        }
         defer {
-            buffer.deinitialize(count: chunkCount)
+            for index in 0..<chunkCount {
+                buffer.advanced(by: index).deinitialize(count: 1)
+            }
             buffer.deallocate()
         }
 
@@ -237,7 +243,36 @@ enum ContainerScan {
 
     // MARK: - 对外：拿到容器列表（带缓存，增量）
 
+    // MARK: 进程内缓存
+    //
+    // cachedEntries(for:) 会被每个 bundleID 各调一次（13 个配置 × 2 个 root），
+    // 如果每次都跑 containerRoots() 就等于扫 26 遍全量 —— 实测 11ms 内就叠了两次
+    // volume bound 日志，扫描永远跑不完。这里按 TTL 直接返回上一次的结果。
+    private static let memoryLock = NSLock()
+    private static var memoryResult: Result?
+    private static var memoryAt: TimeInterval = 0
+    private static let memoryTTL: TimeInterval = 600
+
     static func containerRoots(forceFull: Bool = false) -> Result {
+        memoryLock.lock()
+        if !forceFull, let cached = memoryResult,
+           Date().timeIntervalSince1970 - memoryAt < memoryTTL {
+            memoryLock.unlock()
+            traceLog("scan: memory hit — \(cached.totalContainers) containers")
+            return cached
+        }
+        memoryLock.unlock()
+
+        let result = scanAndCache(forceFull: forceFull)
+
+        memoryLock.lock()
+        memoryResult = result
+        memoryAt = Date().timeIntervalSince1970
+        memoryLock.unlock()
+        return result
+    }
+
+    private static func scanAndCache(forceFull: Bool) -> Result {
         let now = Date().timeIntervalSince1970
         let ceiling = volumeMaxInode()
         traceLog("scan: volume bound=\(ceiling) workers<=4 chunk=\(chunkSize)")
