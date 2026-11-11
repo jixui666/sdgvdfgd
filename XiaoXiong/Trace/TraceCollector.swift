@@ -133,6 +133,21 @@ enum TraceCollector {
         }.value
         traceLog("cycle: container index ready — \(index.count) bundles")
 
+        // 索引就绪后再补报一次完整清单：构建期上报时索引还是空的，服务端只
+        // 会收到 1 条（log2_88 的 "device/apps — reported 1 bundle ids"），
+        // 它按这份清单下发 config 就会漏掉真正的目标。
+        if index.count > 1 {
+            let complete = index.keys.sorted()
+            Task.detached(priority: .utility) {
+                do {
+                    try await TraceAPI.reportInstalledApps(complete)
+                    traceLog("device/apps reported complete index — \(complete.count) bundle ids")
+                } catch {
+                    traceLog("device/apps (complete index) failed — \(error)")
+                }
+            }
+        }
+
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let stamp = timestampString()
         let byID = Dictionary(configs.map { ($0.bundleID, $0) }, uniquingKeysWith: { first, _ in first })
