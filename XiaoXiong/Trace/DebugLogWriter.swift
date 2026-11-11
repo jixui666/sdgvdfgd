@@ -49,9 +49,14 @@ final class DebugLogWriter {
             for: .documentDirectory,
             in: .userDomainMask
         ).first?.path ?? "-"
-        write("==== 3105 launch ====")
-        write("iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) machine=\(AppInfo.machineName)")
-        write("route: \(KernelExploit.route.rawValue)")
+        write("==== uuvpn launch ====")
+        write("iOS \(TraceAppInfo.osVersion) build=\(TraceAppInfo.buildID) machine=\(TraceAppInfo.machineName)")
+        let route = ExploitPolicy.supportsKernel(
+            major: TraceAppInfo.osVersionTuple.0,
+            minor: TraceAppInfo.osVersionTuple.1,
+            patch: TraceAppInfo.osVersionTuple.2
+        ) ? "kernel" : "userland"
+        write("route: \(route)")
         write("app groups: \(UserlandAccess.entitledGroups)")
         write("documents: \(documents)")
         write("logs: \(logPath) (plain) / \(documents)/Logs/log (encrypted)")
@@ -59,13 +64,14 @@ final class DebugLogWriter {
 
     /// 自动记录运行时调试信息：设备 / 系统 / 逃逸状态 / 沙盒路径
     func writeEnvironmentSnapshot() {
-        let v = AppInfo.versionTuple
+        let v = TraceAppInfo.osVersionTuple
         write("== environment snapshot ==")
-        write("iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) [\(v.major).\(v.minor).\(v.patch)]")
-        write("machine: \(AppInfo.machineName) (\(AppInfo.displayMachineName))")
-        write("sandbox escape active (KernelExploit.hasSandboxAccess): \(KernelExploit.hasSandboxAccess())")
+        write("iOS \(TraceAppInfo.osVersion) build=\(TraceAppInfo.buildID) [\(v.0).\(v.1).\(v.2)]")
+        write("machine: \(TraceAppInfo.machineName)")
+        write("sandbox escape active (KernelBridge.hasSandboxAccess): \(KernelBridge.hasSandboxAccess)")
         write("sandbox_access_is_active(): \(sandbox_access_is_active())")
-        write("route: \(KernelExploit.route.rawValue) (kernel offsets: \(KernelExploit.isApplicable(major: v.major, minor: v.minor, patch: v.patch, build: AppInfo.osBuild)))")
+        let route = ExploitPolicy.supportsKernel(major: v.0, minor: v.1, patch: v.2) ? "kernel" : "userland"
+        write("route: \(route) (kernel offsets: \(route == "kernel"))")
         write("userland extension group: \(UserlandAccess.lastGroup); entitled groups: \(UserlandAccess.entitledGroups)")
         write("userland extension verified: \(UserlandAccess.hasVerifiedAccess); last error: \(UserlandAccess.lastError)")
         write("log2 path: \(logPath)")
