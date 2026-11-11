@@ -604,6 +604,13 @@ enum ContainerStore {
     /// index into 18 s of work. They are scanned lazily, and only for a bundle
     /// the app index could not answer.
     private static func buildContainerIndex() -> [String: String] {
+        // 3105 的 containerIndexSnapshot(waitForBuild:) 会一直等到 1..ceiling
+        // 走完（约 220s），第一个 cycle 就能命中所有已安装 app。移植版以前只
+        // 等到热点窗口（2.1M/37.95M ≈ 5.5%）就返回，索引永远只剩那几个越狱
+        // 工具，13 个 config 全 MISS（log2_86 / container-index_7.txt）。
+        // 这里补上同样的等待；超时则保留已扫到的部分，下一轮从 filledLow 续跑。
+        let settled = ContainerScan.waitForFullScan()
+        traceLog("browser: container scan settled — \(settled.totalContainers) containers (full=\(settled.didFullScan))")
         let result = scanContainerRoots(appDataRoots)
         traceLog("browser: container index built — mapped=\(result.index.count) grants=\(result.granted) refused=\(result.refused)")
         return result.index

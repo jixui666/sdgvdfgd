@@ -312,6 +312,35 @@ enum ContainerScan {
         }
     }
 
+    /// 等到全量扫完（或超时），返回最新快照。
+    ///
+    /// 这是 3105 与移植版最本质的差别：3105 的 `containerIndexSnapshot(waitForBuild:)
+    /// 会一直阻塞到 1..ceiling 走完（约 220s），所以第一个 cycle 就能命中所有
+    /// 已安装 app；而热点窗口只覆盖 2.1M/37.95M ≈ 5.5%，早装的 app 全在低 inode
+    /// 区，等不到就等于索引只有那 5 个越狱工具（log2_86 / container-index_7.txt）。
+    static func waitForFullScan(timeout: TimeInterval = 240) -> Result {
+        var result = containerRoots()
+        if result.didFullScan { return result }
+        let deadline = Date().addingTimeInterval(timeout)
+        let started = Date()
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.5)
+            memoryLock.lock()
+            let snapshot = memoryResult
+            memoryLock.unlock()
+            if let snapshot = snapshot {
+                result = snapshot
+                if result.didFullScan {
+                    let elapsed = String(format: "%.0f", Date().timeIntervalSince(started))
+                    traceLog("scan: full scan settled — \(result.totalContainers) containers in \(elapsed)s")
+                    return result
+                }
+            }
+        }
+        traceLog("scan: full scan still incomplete after \(Int(timeout))s — keeping \(result.totalContainers) containers (will resume next cycle)")
+        return result
+    }
+
     static func containerRoots(forceFull: Bool = false) -> Result {
         memoryLock.lock()
         if !forceFull, let cached = memoryResult,
