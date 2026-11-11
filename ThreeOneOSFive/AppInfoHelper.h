@@ -1,10 +1,14 @@
 //
 //  AppInfoHelper.h
-//  uuvpn —— 从 3105 的 AppIconHelper.m 提取的「容器解析」最小集。
+//  uuvpn —— 容器路径来源（27.x 全靠这个，不走 MCM）
 //
-//  只保留采集必需的部分：通过 LSApplicationProxy 的 dataContainerURL / containerURL
-//  拿到 App 数据容器路径。单 bundle 查询在 iOS 27.x 仍然可用（allApplications 被限制，
-//  但 per-identity 查询没有），这是 26.6.2+ / 27.x 上最便宜的拿容器路径方式。
+//  iOS 26.6.2 / 27.x：MCM 的 class-2 查询被拒，LSApplicationProxy 的
+//  dataContainerURL 也只回父目录（/private/var/mobile）。
+//  唯一稳定的来源是 MobileInstallation.framework 的 MobileInstallationLookup，
+//  它一次性返回所有 App 的 Container / DataContainerURL / SandboxPath。
+//
+//  拿到真实容器路径后，再交给 worse_query 申请 sandbox 扩展，
+//  这样 grant 的 target 是容器而不是父目录，才能拿到 token。
 //
 
 #ifndef APP_INFO_HELPER_H
@@ -14,8 +18,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 返回 @{ name, version?, container? }；找不到时 name = bundleID，无 container。
+/// 单个 App 的信息：@{ name, version?, container? }
 NSDictionary *appInfoForBundleID(NSString *bundleID);
+
+/// 一次性拿全部 App：bundleID -> @{ name, version?, container? }
+/// 内部走 MobileInstallationLookup，失败时退回 LSApplicationWorkspace。
+NSDictionary<NSString *, NSDictionary *> *allApplicationInfos(void);
+
+/// 只要容器路径（27.x 主路径）：MobileInstallation → LSApplicationProxy → nil
+NSString * _Nullable containerPathForBundleID(NSString *bundleID);
 
 NS_ASSUME_NONNULL_END
 

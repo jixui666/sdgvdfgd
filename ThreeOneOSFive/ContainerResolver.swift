@@ -135,48 +135,35 @@ enum ContainerResolver {
         let trimmed = bundleID.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
 
-        // 0) LaunchServices 单 bundle 查询 —— 27.x 唯一还开着的路
-        if let info = appInfoForBundleID(trimmed) as? [String: Any] {
-            if let container = info["container"] as? String, container.hasPrefix("/") {
-                let canonical = canonicalPath(container)
-                if isContainerPath(canonical) {
-                    traceLog("resolver: LS proxy resolved \(trimmed) -> \(canonical)")
-                    retainAccess(canonical)
-                    return canonical
-                }
-                // 27.x 上 dataContainerURL 有时只回父目录（/private/var/mobile），
-                // 那种路径 grant 一定 -6，3105 会跳过它继续走 MCM/扫描。
-                traceLog("resolver: LS proxy returned non-container \(canonical) for \(trimmed) — skipping")
-            } else {
-                traceLog("resolver: LS proxy has no container for \(trimmed)")
+        // 27.x 的正确路子：先拿到「真实容器路径」，再交给 worse_query 申请扩展。
+        // 对 /var/mobile、/private 这类父目录 grant 一律 -6，所以路径必须先校验。
+        //
+        // 来源顺序（与 3105 一致）：
+        //   1. MobileInstallation.framework 的 MobileInstallationLookup —— 27.x 主路径
+        //   2. LSApplicationProxy.dataContainerURL —— 27.x 常只回父目录，需校验
+        if let raw = containerPathForBundleID(trimmed), !raw.isEmpty {
+            let canonical = canonicalPath(raw)
+            if isContainerPath(canonical) {
+                traceLog("resolver: container resolved \(trimmed) -> \(canonical) (route=\(accessRoute))")
+                retainAccess(canonical)
+                return canonical
             }
+            traceLog("resolver: container candidate \(canonical) is not a real container for \(trimmed)")
         } else {
-            traceLog("resolver: LS proxy unavailable for \(trimmed)")
+            traceLog("resolver: no container path for \(trimmed) (MobileInstallation + LSProxy both empty)")
         }
 
-        // 1) 定向查询：class/flags/part 全组合扫描（3105 的 MCMResolveContainerPathForIdentifier）
-        //    27.x 上 MHA-C2 的单一组合会被拒，但 168 种组合里通常有一种能过。
+        // 26.6.1 及以下（kernel 路线）还能走 MCM；27.x 上这些查询会被拒，纯兜底。
         if MCMLease.hostBundleIDMatches, MCMLease.isBridgeAvailable {
             var diag: NSString?
-            if let path = MCMResolveContainerPathForIdentifier(trimmed, &diag), !path.isEmpty {
+            if let path = MCMResolveContainerPathForIdentifier(trimmed, &diag),
+               !path.isEmpty, isContainerPath(path) {
                 traceLog("resolver: MCM sweep resolved \(trimmed) -> \(path)")
                 retainAccess(path)
                 return path
             }
             let detail = (diag as String?) ?? "no combination"
             traceLog("resolver: MCM sweep refused \(trimmed) — \(detail)")
-        }
-
-        // 2) MCM class 2 单发（需要 MHA 身份）
-        if MCMLease.hostBundleIDMatches {
-            var error: NSString?
-            if let path = MCMActivateContainerPath(2, trimmed, false, &error), !path.isEmpty {
-                traceLog("resolver: MHA-C2 resolved \(trimmed) -> \(path)")
-                retainAccess(path)
-                return path
-            }
-            let detail = error.map(String.init) ?? "unavailable"
-            traceLog("resolver: MHA-C2 denied \(trimmed) — \(detail)")
         }
 
         // 3) 文件系统扫描（需要父目录扩展或内核访问）

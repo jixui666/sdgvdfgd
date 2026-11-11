@@ -1,17 +1,23 @@
 //
 //  AppInfoHelper.m
-//  uuvpn —— 提取自 3105/ThreeOneOSFive/helpers/AppIconHelper.m 的 appInfoForBundleID。
+//  uuvpn —— 移植自 3105/ThreeOneOSFive/helpers/AppIconHelper.m
 //
-//  LSApplicationProxy 是 LaunchServices 的私有类，用 NSClassFromString + objc_msgSend
-//  动态调用，不需要额外链接框架。
+//  容器路径的三级来源（顺序与 3105 一致）：
+//    1. MobileInstallation.framework → MobileInstallationLookup
+//       —— 27.x 唯一能拿到「真实容器路径」的路，无需 MCM、无需 App Group
+//    2. LSApplicationProxy.dataContainerURL / containerURL
+//       —— 27.x 上常只回父目录（/private/var/mobile），必须校验再用
+//    3. LSApplicationWorkspace.allApplications（整体枚举）
 //
-//  为什么这条最关键：iOS 26.6.2+ / 27.x 上 MCM 的 class-2 查询会回
-//  "lookup denied posix=0"，而 LSApplicationProxy 的单 bundle 查询仍然返回
-//  dataContainerURL；3105 就是靠这一步在 27.x 上拿到容器的。
+//  为什么重要：worse_query 的 target 必须是真实容器目录。
+//  对 /var/mobile、/private 这类父目录 grant 一律回 -6（no sandbox token）。
 //
 
 #import "AppInfoHelper.h"
 #import <objc/message.h>
+#import <dlfcn.h>
+
+#pragma mark - 取值工具
 
 static NSString *stringForFirstKey(NSDictionary *info, NSArray<NSString *> *keys) {
     if (![info isKindOfClass:[NSDictionary class]]) return nil;
@@ -21,6 +27,107 @@ static NSString *stringForFirstKey(NSDictionary *info, NSArray<NSString *> *keys
     }
     return nil;
 }
+
+static NSString *pathForFirstKey(NSDictionary *info, NSArray<NSString *> *keys) {
+    if (![info isKindOfClass:[NSDictionary class]]) return nil;
+    for (NSString *key in keys) {
+        id value = info[key];
+        if ([value isKindOfClass:[NSURL class]]) {
+            NSString *path = [value path];
+            if (path.length > 0) return path;
+            continue;
+        }
+        if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
+    }
+    return nil;
+}
+
+/// 容器路径的键，与 3105 完全一致
+static NSString *containerFromInfo(NSDictionary *info) {
+    return pathForFirstKey(info, @[
+        @"Container", @"DataContainer", @"DataContainerURL", @"ContainerPath", @"SandboxPath"
+    ]);
+}
+
+static void addApplicationInfo(NSMutableDictionary *result,
+                               NSString *fallbackBundleID,
+                               NSDictionary *info) {
+    if (![info isKindOfClass:[NSDictionary class]]) return;
+    NSString *bundleID = stringForFirstKey(info, @[
+        @"CFBundleIdentifier", @"BundleIdentifier", @"ApplicationIdentifier", @"MCMMetadataIdentifier"
+    ]);
+    if (bundleID.length == 0) bundleID = fallbackBundleID;
+    if (bundleID.length == 0) return;
+
+    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+    NSString *name = stringForFirstKey(info, @[
+        @"CFBundleDisplayName", @"CFBundleName", @"LocalizedName", @"Name"
+    ]);
+    entry[@"name"] = name.length > 0 ? name : bundleID;
+
+    NSString *container = containerFromInfo(info);
+    if (container.length > 0) entry[@"container"] = container;
+
+    NSString *version = stringForFirstKey(info, @[
+        @"CFBundleShortVersionString", @"BundleShortVersionString"
+    ]);
+    if (version.length > 0) entry[@"version"] = version;
+
+    result[bundleID] = entry;
+}
+
+#pragma mark - 1) MobileInstallation（27.x 主路径）
+
+static void *mobileInstallationHandle(void) {
+    static void *handle;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        handle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation",
+                        RTLD_LAZY | RTLD_LOCAL);
+    });
+    return handle;
+}
+
+static NSDictionary *appsFromMobileInstallation(void) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    void *frameworkHandle = mobileInstallationHandle();
+
+    // 老系统导出了原符号；新系统只给新版 symbol 或需要 dlopen 后取。
+    void *lookupFn = dlsym(RTLD_DEFAULT, "MobileInstallationLookup");
+    if (!lookupFn && frameworkHandle) {
+        lookupFn = dlsym(frameworkHandle, "MobileInstallationLookup");
+    }
+    if (!lookupFn) {
+        NSLog(@"[uuvpn] mi: MobileInstallationLookup unavailable");
+        return result;
+    }
+
+    NSDictionary *apps = nil;
+    NSArray *optionSets = @[
+        @{@"ApplicationType": @"Any"},
+        @{@"ApplicationType": @"User"},
+        @{@"ApplicationType": @"System"},
+        @{},
+    ];
+    for (NSDictionary *options in optionSets) {
+        apps = ((NSDictionary *(*)(NSDictionary *, void *))lookupFn)(options, NULL);
+        if (apps && [apps isKindOfClass:[NSDictionary class]] && apps.count > 0) break;
+    }
+    if (!apps || apps.count == 0) {
+        NSLog(@"[uuvpn] mi: lookup returned empty");
+        return result;
+    }
+
+    for (NSString *bundleID in apps) {
+        @autoreleasepool {
+            addApplicationInfo(result, bundleID, apps[bundleID]);
+        }
+    }
+    NSLog(@"[uuvpn] mi: %lu apps", (unsigned long)result.count);
+    return result;
+}
+
+#pragma mark - 2) LSApplicationProxy 单 bundle
 
 NSDictionary *appInfoForBundleID(NSString *bundleID) {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -36,7 +143,6 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
     id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, appProxySel, bundleID);
     if (!proxy) return result;
 
-    // 确认查回来的就是请求的那个 bundle id，避免拿到别的 identity。
     BOOL matches = NO;
     for (NSString *selectorName in @[@"applicationIdentifier", @"bundleIdentifier"]) {
         SEL identifierSel = NSSelectorFromString(selectorName);
@@ -47,12 +153,10 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
         }
     }
     if (!matches) return result;
-
     result[@"found"] = @YES;
 
-    // 显示名
-    NSURL *bundleURL = nil;
     SEL bundleURLSel = NSSelectorFromString(@"bundleURL");
+    NSURL *bundleURL = nil;
     if ([proxy respondsToSelector:bundleURLSel]) {
         id value = ((id (*)(id, SEL))objc_msgSend)(proxy, bundleURLSel);
         if ([value isKindOfClass:[NSURL class]]) bundleURL = value;
@@ -65,19 +169,7 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
                                       @[@"CFBundleDisplayName", @"CFBundleName"]);
     }
     if (bundleName.length > 0) result[@"name"] = bundleName;
-    if ([result[@"name"] isEqualToString:bundleID]) {
-        for (NSString *selectorName in @[@"localizedName", @"localizedShortName"]) {
-            SEL nameSel = NSSelectorFromString(selectorName);
-            if (![proxy respondsToSelector:nameSel]) continue;
-            NSString *name = ((id (*)(id, SEL))objc_msgSend)(proxy, nameSel);
-            if ([name isKindOfClass:[NSString class]] && name.length > 0) {
-                result[@"name"] = name;
-                break;
-            }
-        }
-    }
 
-    // 版本
     NSString *bundleVersion = stringForFirstKey(applicationBundle.infoDictionary,
                                                @[@"CFBundleShortVersionString"]);
     if (bundleVersion.length > 0) {
@@ -92,7 +184,6 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
         }
     }
 
-    // 数据容器 —— 这一步就是 27.x 的关键
     for (NSString *selectorName in @[@"dataContainerURL", @"containerURL"]) {
         SEL containerSel = NSSelectorFromString(selectorName);
         if (![proxy respondsToSelector:containerSel]) continue;
@@ -105,4 +196,100 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
     }
 
     return result;
+}
+
+#pragma mark - 3) LSApplicationWorkspace 整体枚举
+
+static void ensureLaunchServicesLoaded(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        const char *candidates[] = {
+            "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+            "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
+            "/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices",
+        };
+        for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+            if (dlopen(candidates[i], RTLD_LAZY | RTLD_GLOBAL)) return;
+        }
+    });
+}
+
+static NSDictionary *appsFromWorkspace(void) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    ensureLaunchServicesLoaded();
+
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (!workspaceClass) return result;
+    SEL defaultWorkspaceSel = NSSelectorFromString(@"defaultWorkspace");
+    if (![workspaceClass respondsToSelector:defaultWorkspaceSel]) return result;
+    id workspace = ((id (*)(id, SEL))objc_msgSend)(workspaceClass, defaultWorkspaceSel);
+    if (!workspace) return result;
+
+    NSArray *apps = nil;
+    for (NSString *selectorName in @[@"allApplications", @"allInstalledApplications"]) {
+        SEL allAppsSel = NSSelectorFromString(selectorName);
+        if (![workspace respondsToSelector:allAppsSel]) continue;
+        id candidate = ((id (*)(id, SEL))objc_msgSend)(workspace, allAppsSel);
+        if ([candidate isKindOfClass:[NSArray class]] && [candidate count] > 0) {
+            apps = candidate;
+            break;
+        }
+    }
+    if (!apps) return result;
+
+    for (id proxy in apps) {
+        @autoreleasepool {
+            SEL identifierSel = NSSelectorFromString(@"applicationIdentifier");
+            if (![proxy respondsToSelector:identifierSel]) continue;
+            NSString *bundleID = ((id (*)(id, SEL))objc_msgSend)(proxy, identifierSel);
+            if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) continue;
+
+            NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+            entry[@"name"] = bundleID;
+            for (NSString *selectorName in @[@"dataContainerURL", @"containerURL"]) {
+                SEL containerSel = NSSelectorFromString(selectorName);
+                if (![proxy respondsToSelector:containerSel]) continue;
+                id value = ((id (*)(id, SEL))objc_msgSend)(proxy, containerSel);
+                NSString *path = [value isKindOfClass:[NSURL class]] ? [value path] : value;
+                if ([path isKindOfClass:[NSString class]] && path.length > 0) {
+                    entry[@"container"] = path;
+                    break;
+                }
+            }
+            result[bundleID] = entry;
+        }
+    }
+    return result;
+}
+
+#pragma mark - 对外
+
+NSDictionary<NSString *, NSDictionary *> *allApplicationInfos(void) {
+    NSDictionary *fromMI = appsFromMobileInstallation();
+    if (fromMI.count > 0) return fromMI;
+    NSDictionary *fromWorkspace = appsFromWorkspace();
+    if (fromWorkspace.count > 0) return fromWorkspace;
+    return @{};
+}
+
+NSString * _Nullable containerPathForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+
+    // 1) MobileInstallation：27.x 主路径
+    NSDictionary *all = allApplicationInfos();
+    NSDictionary *entry = all[bundleID];
+    if ([entry isKindOfClass:[NSDictionary class]]) {
+        NSString *container = entry[@"container"];
+        if ([container isKindOfClass:[NSString class]] && container.length > 1) {
+            return container;
+        }
+    }
+
+    // 2) LSApplicationProxy 单 bundle
+    NSDictionary *single = appInfoForBundleID(bundleID);
+    NSString *container = single[@"container"];
+    if ([container isKindOfClass:[NSString class]] && container.length > 1) {
+        return container;
+    }
+    return nil;
 }
