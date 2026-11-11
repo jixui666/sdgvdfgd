@@ -229,10 +229,10 @@ enum ContainerStore {
             traceLog("patch: container index still building — deferring \(bundleID)")
             return nil
         }
-        guard KernelBridge.hasSandboxAccess || UserlandAccess.hasVerifiedAccess else {
-            traceLog("patch: metadata scan skipped — no filesystem access (kernel or userland)")
-            return nil
-        }
+        // 不要用 UserlandAccess.hasVerifiedAccess 当门槛：probe 只探测「目录
+        // root」，而 27.x 上 root 一律拿不到 token（-6），容器目录却能 grant
+        // （log2_86: mapped=5 grants=5 refused=0）。拿 root 的失败去否掉整条
+        // 文件系统路，等于自己把自己锁死。
 
         // Fallback scan (index stale after a fresh install / container move).
         for root in metadataScanRoots {

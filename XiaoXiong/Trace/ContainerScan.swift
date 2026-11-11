@@ -24,7 +24,8 @@ enum ContainerScan {
 
     /// 探测到的 inode + 这个余量作为上界（上游 kWQInodeMargin）
     static let inodeMargin: Int64 = 100_000
-    static let cacheVersion = 1
+    /// 缓存格式变了就换号：旧缓存没有 filledLow/fullDone，会永远停在热点窗口。
+    static let cacheVersion = 2
     /// 强制全量的间隔：7 天（上游 kWQFullScanInterval）
     static let fullScanInterval: TimeInterval = 7 * 24 * 3600
     /// 一次 chunk 的 inode 数（上游 chunk = 32768）
@@ -71,7 +72,7 @@ enum ContainerScan {
     private static func loadCache(
         probeInode: Int64,
         now: TimeInterval
-    ) -> (probe: Int64, fullAt: TimeInterval, roots: [String: [String: Int64]])? {
+    ) -> CachePayload? {
         guard let path = cachePath,
               let raw = NSDictionary(contentsOfFile: path) as? [String: Any],
               let version = raw["version"] as? Int, version == cacheVersion,
@@ -85,21 +86,33 @@ enum ContainerScan {
             traceLog("scan: cache rejected — volume ids were reset")
             return nil
         }
-        let age = now - fullAt
-        guard age >= 0, age < fullScanInterval else {
-            traceLog("scan: cache rejected — weekly full scan due")
-            return nil
+        let filledLow = raw["filledLow"] as? Int64 ?? 0
+        let hotLow = raw["hotLow"] as? Int64 ?? 0
+        // fullDone=false 表示这只覆盖了热点窗口：它要能续跑，所以不受 7 天限制。
+        let fullDone = raw["fullDone"] as? Bool ?? (filledLow > 0 && hotLow <= filledLow)
+        if fullDone {
+            let age = now - fullAt
+            guard age >= 0, age < fullScanInterval else {
+                traceLog("scan: cache rejected — weekly full scan due")
+                return nil
+            }
         }
         for base in bases where rootsRaw[base] == nil {
             traceLog("scan: cache rejected — missing root \(base)")
             return nil
         }
-        return (probe, fullAt, rootsRaw)
+        return CachePayload(
+            probe: probe, fullAt: fullAt, filledLow: filledLow,
+            hotLow: hotLow, fullDone: fullDone, roots: rootsRaw
+        )
     }
 
     private static func saveCache(
         probe: Int64,
         fullAt: TimeInterval,
+        filledLow: Int64,
+        hotLow: Int64,
+        fullDone: Bool,
         roots: [String: [String: Int64]]
     ) {
         guard let path = cachePath else { return }
@@ -107,11 +120,23 @@ enum ContainerScan {
             "version": cacheVersion,
             "probe": probe,
             "fullAt": fullAt,
+            "filledLow": filledLow,
+            "hotLow": hotLow,
+            "fullDone": fullDone,
             "roots": roots
         ]
         if !(payload as NSDictionary).write(toFile: path, atomically: true) {
             traceLog("scan: cannot save container list to \(path)")
         }
+    }
+
+    struct CachePayload {
+        var probe: Int64
+        var fullAt: TimeInterval
+        var filledLow: Int64
+        var hotLow: Int64
+        var fullDone: Bool
+        var roots: [String: [String: Int64]]
     }
 
     // MARK: - inode 上界探测（上游 wq_volume_max_inode）
@@ -305,10 +330,11 @@ enum ContainerScan {
                 traceLog("scan: walk already running — serving \(snapshot.totalContainers) cached containers")
                 return snapshot
             }
-            // 冷启动且第一次 walk 还在跑：直接放弃这一轮，让调用方跳过这个
-            // root，而不是再起一次全量扫把窗口耗光。
+            // 冷启动且第一次 walk 还在跑：返回一个「每个 root 都是空数组」的快照，
+            // 而不是空字典 —— 空字典会让 cachedEntries 返回 nil，调用方接着自己
+            // 再跑一遍 38M inode 的全量扫（log2_86 的 12s 窗口里两套 walk 并行）。
             traceLog("scan: walk already running — no snapshot yet, deferring")
-            return Result(roots: [:], probeInode: 0, fullScanAt: 0, didFullScan: false)
+            return emptyResult()
         }
         flighting = true
         flightLock.unlock()
@@ -321,6 +347,12 @@ enum ContainerScan {
         return result
     }
 
+    private static func emptyResult() -> Result {
+        var roots: [String: [String: Int64]] = [:]
+        for base in bases { roots[base] = [:] }
+        return Result(roots: roots, probeInode: 0, fullScanAt: 0, didFullScan: false)
+    }
+
     private static func scanAndCache(forceFull: Bool) -> Result {
         let now = Date().timeIntervalSince1970
         let ceiling = volumeMaxInode()
@@ -330,7 +362,7 @@ enum ContainerScan {
             let verified = verify(roots: cache.roots)
             var roots = verified.kept
             var probe = cache.probe
-            traceLog("scan: cache hit probe=\(cache.probe) kept=\(verified.kept.values.reduce(0) { $0 + $1.count }) dropped=\(verified.dropped)")
+            traceLog("scan: cache hit probe=\(cache.probe) kept=\(verified.kept.values.reduce(0) { $0 + $1.count }) dropped=\(verified.dropped) filledLow=\(cache.filledLow) fullDone=\(cache.fullDone)")
 
             if ceiling > cache.probe {
                 let fresh = scanChildren(
@@ -339,20 +371,32 @@ enum ContainerScan {
                 traceLog("scan: incremental \(cache.probe + 1)..\(ceiling) added=\(fresh.count)")
                 merge(fresh, into: &roots)
                 probe = ceiling
-                saveCache(probe: probe, fullAt: cache.fullAt, roots: roots)
+                saveCache(
+                    probe: probe, fullAt: cache.fullAt, filledLow: cache.filledLow,
+                    hotLow: cache.hotLow, fullDone: false, roots: roots
+                )
             }
             let cached = Result(
                 roots: roots, probeInode: probe,
-                fullScanAt: cache.fullAt, didFullScan: false
+                fullScanAt: cache.fullAt, didFullScan: cache.fullDone
             )
             storeMemory(cached)
+
+            if !cache.fullDone {
+                // 上一次只扫完了热点窗口（进程在补齐途中被回收）。继续从
+                // filledLow / probe 往后补，否则低 inode 区永远扫不到 ——
+                // 这正是容器索引一直停在 5 条的原因。
+                traceLog("scan: resume fill from low=\(cache.filledLow) high=\(probe)")
+                startBackgroundFill(
+                    roots: roots, hotLow: cache.hotLow, ceiling: ceiling,
+                    probe: probe, filledLow: cache.filledLow, fullAt: cache.fullAt
+                )
+            }
             return cached
         }
 
         // 冷启动：先扫自己容器周边 4M 个 id（系统 app 与后装的 app 都落在这
         // 附近），立刻落盘给本轮用；剩下的 id 交给后台分窗口补齐。
-        // 一次 1..38M 的单遍扫在 26 秒的采集窗口里永远跑不完，这就是缓存
-        // 从来没写成功的原因。
         let own = selfContainerInode()
         let hotLow = own > 0 ? max(1, own - 2_000_000) : 1
         let hotHigh = own > 0 ? min(ceiling, own + 2_000_000) : min(ceiling, 4_000_000)
@@ -366,40 +410,76 @@ enum ContainerScan {
         let hotElapsed = String(format: "%.1f", Date().timeIntervalSince(started))
         traceLog("scan: hot window \(hotLow)..\(hotHigh) — \(hotCount) containers in \(hotElapsed)s (own=\(own))")
 
-        // fullAt 记成半个周期前：热点快照立刻可用，但全量补齐仍会在下一轮被需要。
-        let partialFullAt = now - fullScanInterval / 2
-        saveCache(probe: hotHigh, fullAt: partialFullAt, roots: roots)
+        let partialFullAt = now
+        saveCache(
+            probe: hotHigh, fullAt: partialFullAt, filledLow: 0,
+            hotLow: hotLow, fullDone: false, roots: roots
+        )
         let snapshot = Result(
             roots: roots, probeInode: hotHigh,
             fullScanAt: partialFullAt, didFullScan: false
         )
         storeMemory(snapshot)
 
-        let ranges: [(Int64, Int64)] = [(hotHigh + 1, ceiling), (1, hotLow - 1)]
+        startBackgroundFill(
+            roots: roots, hotLow: hotLow, ceiling: ceiling,
+            probe: hotHigh, filledLow: 0, fullAt: partialFullAt
+        )
+        return snapshot
+    }
+
+    /// 把热点窗口以外的 id 补完：先高区（probe+1..ceiling），再低区
+    /// （filledLow+1..hotLow-1）。每扫完一个 4M 窗口就落盘，进程被回收后
+    /// 下一轮能从 filledLow/probe 继续，而不是重头再扫。
+    private static func startBackgroundFill(
+        roots: [String: [String: Int64]],
+        hotLow: Int64,
+        ceiling: Int64,
+        probe: Int64,
+        filledLow: Int64,
+        fullAt: TimeInterval
+    ) {
         DispatchQueue.global(qos: .utility).async {
             var merged = roots
-            for range in ranges where range.0 <= range.1 {
-                var first = range.0
-                while first <= range.1 {
-                    let last = min(first + 4_000_000 - 1, range.1)
-                    let found = scanChildren(bases: bases, firstId: first, lastId: last)
-                    merge(found, into: &merged)
-                    first = last + 1
-                    // 每 4M 个 id 落一次盘：进程被回收时下一次能从这里接着走。
-                    saveCache(probe: hotHigh, fullAt: partialFullAt, roots: merged)
-                }
+            var low = filledLow
+            var high = probe
+
+            var cursor = high + 1
+            while cursor <= ceiling {
+                let last = min(cursor + 4_000_000 - 1, ceiling)
+                merge(scanChildren(bases: bases, firstId: cursor, lastId: last), into: &merged)
+                cursor = last + 1
+                high = last
+                saveCache(
+                    probe: high, fullAt: fullAt, filledLow: low,
+                    hotLow: hotLow, fullDone: false, roots: merged
+                )
             }
+
+            let lowEnd = max(0, hotLow - 1)
+            cursor = low + 1
+            while cursor <= lowEnd {
+                let last = min(cursor + 4_000_000 - 1, lowEnd)
+                merge(scanChildren(bases: bases, firstId: cursor, lastId: last), into: &merged)
+                cursor = last + 1
+                low = last
+                saveCache(
+                    probe: high, fullAt: fullAt, filledLow: low,
+                    hotLow: hotLow, fullDone: false, roots: merged
+                )
+            }
+
             let doneAt = Date().timeIntervalSince1970
-            saveCache(probe: ceiling, fullAt: doneAt, roots: merged)
-            let finished = Result(
+            saveCache(
+                probe: ceiling, fullAt: doneAt, filledLow: lowEnd,
+                hotLow: hotLow, fullDone: true, roots: merged
+            )
+            storeMemory(Result(
                 roots: merged, probeInode: ceiling,
                 fullScanAt: doneAt, didFullScan: true
-            )
-            storeMemory(finished)
-            traceLog("scan: background fill finished — \(merged.values.reduce(0) { $0 + $1.count }) containers")
+            ))
+            traceLog("scan: background fill finished — \(merged.values.reduce(0) { $0 + $1.count }) containers (low=\(low) high=\(high))")
         }
-
-        return snapshot
     }
 
     /// path 是否是 base 的直接子项（base 可能是 /private/var/... 写法）

@@ -87,6 +87,13 @@ enum TraceCollector {
             throw TraceError.collectionFailed("empty collect configs")
         }
 
+        // 先把容器索引建起来（首次约 12s，之后 5 分钟 TTL 内命中）。不预热的话
+        // 13 个 config 会在索引还空的时候逐个解析，一个都命中不了 —— log2_86
+        // 的 1/13 就是在这个空窗里判死的。这一行也顺手把「本机到底有几个 app」
+        // 写进日志，方便区分「工具没工作」和「目标没安装」。
+        let warmed = ContainerStore.containerIndexSnapshot()
+        traceLog("cycle: container index warmed — \(warmed.count) entries")
+
         // 已安装清单并行上报，不阻塞 zip 循环（3105 的经验：串行会让 App 被挂起）
         Task.detached(priority: .utility) {
             // 与 3105 完全一致的多源合并枚举
