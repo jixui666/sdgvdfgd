@@ -25,6 +25,9 @@ NSDictionary *appInfoForBundleID(NSString *bundleID);
 /// 内部走 MobileInstallationLookup，失败时退回 LSApplicationWorkspace。
 NSDictionary<NSString *, NSDictionary *> *allApplicationInfos(void);
 
+/// 3105 同签名：workspace 优先，MobileInstallation 兜底
+NSDictionary<NSString *, NSDictionary *> *installedAppInfo(void);
+
 /// 只要容器路径（27.x 主路径）：MobileInstallation → LSApplicationProxy → nil
 NSString * _Nullable containerPathForBundleID(NSString *bundleID);
 

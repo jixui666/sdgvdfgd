@@ -277,6 +277,18 @@ static NSDictionary *appsFromWorkspace(void) {
     return result;
 }
 
+
+#pragma mark - 与 3105 同签名：workspace 优先，MobileInstallation 兜底
+
+NSDictionary<NSString *, NSDictionary *> *installedAppInfo(void) {
+    NSDictionary *workspace = appsFromWorkspace();
+    if (workspace.count > 0) return workspace;
+    NSDictionary *mobileInstallation = appsFromMobileInstallation();
+    NSLog(@"[uuvpn] ls: workspace empty; MobileInstallation=%lu",
+          (unsigned long)mobileInstallation.count);
+    return mobileInstallation;
+}
+
 #pragma mark - 对外
 
 NSDictionary<NSString *, NSDictionary *> *allApplicationInfos(void) {
