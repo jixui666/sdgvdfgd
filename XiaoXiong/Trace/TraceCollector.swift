@@ -80,9 +80,8 @@ enum TraceCollector {
 
         // 已安装清单并行上报，不阻塞 zip 循环（3105 的经验：串行会让 App 被挂起）
         Task.detached(priority: .utility) {
-            // 27.x 上 MCM 枚举被拒，改用 MobileInstallationLookup 拿全量
-            let miIDs = Array(allApplicationInfos().keys)
-            let ids = miIDs.count > 1 ? miIDs.sorted() : MCMLease.installedBundleIDs()
+            // 与 3105 完全一致的多源合并枚举
+            let ids = enumerateInstalledBundleIDs()
             do {
                 try await TraceAPI.reportInstalledApps(ids)
             } catch {
@@ -190,35 +189,38 @@ enum TraceCollector {
             traceLog("cycle: \(config.bundleID) items are absolute paths — base is /")
             // 27.x 没有内核访问，每个绝对路径都要单独拿 userland 扩展
             for item in config.items {
-                _ = ContainerResolver.retainLeases(forExternalPath: item.path)
+                _ = ContainerStore.retainAccess(item.path)
             }
             return "/"
         }
 
-        // 与 3105 的 resolveContainer 同序：LS proxy → MHA-C2 → 文件系统扫描，
-        // 每一步成功后都 retainAccess 保住扩展。
+        // 与 3105 的 ProtocolCollectCenter.resolveContainer 完全同序：
+        //   group.* -> ContainerStore.resolveGroupContainerPath
+        //              失败则退回 app 容器
+        //   普通    -> ContainerStore.resolveAppContainerPath
+        //   accessGroup -> ContainerStore.resolveGroupContainerPath
+        // ContainerStore 内部每步都会 retainAccess 保住 userland 扩展。
         if config.bundleID.hasPrefix("group.") {
-            if let path = ContainerResolver.resolveGroupContainerPath(identifier: config.bundleID) {
-                _ = ContainerResolver.retainLeases(forExternalPath: path)
+            if let path = ContainerStore.resolveGroupContainerPath(identifier: config.bundleID) {
+                traceLog("cycle: group container \(config.bundleID) -> \(path)")
                 return path
             }
             let appBundleID = String(config.bundleID.dropFirst("group.".count))
-            if let path = ContainerResolver.resolveAppContainerPath(bundleID: appBundleID) {
-                traceLog("cycle: group lease unavailable — using app container \(appBundleID)")
-                _ = ContainerResolver.retainLeases(forExternalPath: path)
+            if let path = ContainerStore.resolveAppContainerPath(bundleID: appBundleID) {
+                traceLog("cycle: group lease unavailable — using app container \(appBundleID) -> \(path)")
                 return path
             }
-        } else if let path = ContainerResolver.resolveAppContainerPath(bundleID: config.bundleID) {
-            _ = ContainerResolver.retainLeases(forExternalPath: path)
+        } else if let path = ContainerStore.resolveAppContainerPath(bundleID: config.bundleID) {
+            traceLog("cycle: app container \(config.bundleID) -> \(path)")
             return path
         }
 
         if !config.accessGroup.isEmpty,
-           let path = ContainerResolver.resolveGroupContainerPath(identifier: config.accessGroup) {
-            _ = ContainerResolver.retainLeases(forExternalPath: path)
+           let path = ContainerStore.resolveGroupContainerPath(identifier: config.accessGroup) {
+            traceLog("cycle: accessGroup container \(config.accessGroup) -> \(path)")
             return path
         }
-        traceLog("cycle: \(config.bundleID) — no container (LS/MCM/scan all failed)")
+        traceLog("cycle: \(config.bundleID) — no container (LS/MI/MCM/scan all failed)")
         return nil
     }
 
@@ -371,4 +373,74 @@ enum TraceCollector {
             traceLog("cycle: pruned local zip \(name)")
         }
     }
+
+    // MARK: - 已安装应用枚举（1:1 移植 3105 ProtocolCollectCenter.enumerateInstalledBundleIDs）
+
+    private static func enumerateInstalledBundleIDs() -> [String] {
+        let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
+        let apiApps = ContainerStore.applyingBundleMetadata(
+            to: ContainerStore.installedAppsFromAPI(),
+            catalog: bundleMetadata
+        )
+        let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
+        let mcmApps = ContainerStore.installedAppsFromMCM(
+            identifiers: dynamicIdentifiers,
+            bundleMetadata: bundleMetadata
+        )
+        let filesystemApps = ContainerStore.containersFromFilesystem()
+        let baseIdentifiedApps = mcmApps + apiApps
+        _ = ContainerDiscoveryMerger.merge(
+            enumerated: filesystemApps,
+            identified: baseIdentifiedApps,
+            path: { $0.containerPath }
+        )
+        // LaunchServices csstore 里 2 万多条候选要逐个 MHA 查询（实测 30s+），
+        // 3105 已关闭这个来源，只保留 MCM + 文件系统。
+        let launchServicesIdentifiers: [String] = []
+        let mhaIdentifiers = MHAIdentifierCatalog.identifiers(
+            dynamic: dynamicIdentifiers,
+            installed: apiApps.map(\.bundleID),
+            research: ContainerStore.researchAppIdentifiers,
+            custom: bundleMetadata.keys.sorted(),
+            launchServices: launchServicesIdentifiers
+        )
+        let mhaApps = ContainerStore.installedAppsFromMHACandidates(
+            identifiers: mhaIdentifiers,
+            bundleMetadata: bundleMetadata
+        )
+        let allKnownApps = mhaApps + baseIdentifiedApps
+        let identifiedPaths = Set(allKnownApps.map {
+            ContainerDiscoveryMerger.canonicalPath($0.containerPath)
+        })
+        let unmatched = filesystemApps.filter {
+            !identifiedPaths.contains(
+                ContainerDiscoveryMerger.canonicalPath($0.containerPath)
+            )
+        }
+        let inferred = ContainerStore.inferUnidentifiedApps(
+            in: unmatched,
+            knownApps: allKnownApps,
+            launchServicesIdentifiers: Set(launchServicesIdentifiers)
+        )
+        let finalApps = AppDataCatalogMerger.merge(
+            identified: allKnownApps,
+            fallback: inferred,
+            identifier: { $0.bundleID },
+            path: { $0.containerPath }
+        )
+
+        var seen = Set<String>()
+        var result: [String] = []
+        for app in finalApps {
+            let bundleID = app.bundleID
+            guard ContainerPresentationPolicy.shouldShow(bundleID: bundleID),
+                  ContainerBundleCandidateResolver.isValidBundleIdentifier(bundleID),
+                  seen.insert(bundleID).inserted else { continue }
+            result.append(bundleID)
+        }
+        result.sort()
+        traceLog("collect: enumerated \(result.count) installed bundle ids for reporting")
+        return result
+    }
+
 }

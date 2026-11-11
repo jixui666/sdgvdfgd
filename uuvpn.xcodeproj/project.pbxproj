@@ -15,6 +15,9 @@
 		F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */; };
 		F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */; };
 		F1A000FB2E90000200D5A0FB /* DebugLogWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */; };
+		F1A001012E90000200D5A101 /* ContainerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001022E90000200D5A102 /* ContainerStore.swift */; };
+		F1A001032E90000200D5A103 /* ContainerBrowserLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */; };
+		F1A001052E90000200D5A105 /* PatchPathValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A001062E90000200D5A106 /* PatchPathValidator.swift */; };
 		F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000042E90000200D5A004 /* kexploit_opa334.m */; };
 		F1A000142E90000200D5A014 /* krw.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000052E90000200D5A005 /* krw.m */; };
 		F1A000152E90000200D5A015 /* kutils.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000062E90000200D5A006 /* kutils.m */; };
@@ -335,6 +338,9 @@
 		F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/UserlandAccess.swift; sourceTree = SOURCE_ROOT; };
 		F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/ExploitPolicy.swift; sourceTree = SOURCE_ROOT; };
 		F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/DebugLogWriter.swift; sourceTree = SOURCE_ROOT; };
+		F1A001022E90000200D5A102 /* ContainerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/ContainerStore.swift; sourceTree = SOURCE_ROOT; };
+		F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/ContainerBrowserLogic.swift; sourceTree = SOURCE_ROOT; };
+		F1A001062E90000200D5A106 /* PatchPathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/PatchPathValidator.swift; sourceTree = SOURCE_ROOT; };
 		F1A000042E90000200D5A004 /* kexploit_opa334.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/kexploit_opa334.m; sourceTree = SOURCE_ROOT; };
 		F1A000052E90000200D5A005 /* krw.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/krw.m; sourceTree = SOURCE_ROOT; };
 		F1A000062E90000200D5A006 /* kutils.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/kutils.m; sourceTree = SOURCE_ROOT; };
@@ -607,6 +613,9 @@
 				F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */,
 				F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */,
 				F1A000FC2E90000200D5A0FC /* DebugLogWriter.swift */,
+				F1A001022E90000200D5A102 /* ContainerStore.swift */,
+				F1A001042E90000200D5A104 /* ContainerBrowserLogic.swift */,
+				F1A001062E90000200D5A106 /* PatchPathValidator.swift */,
 				F1A000042E90000200D5A004 /* kexploit_opa334.m */,
 				F1A000052E90000200D5A005 /* krw.m */,
 				F1A000062E90000200D5A006 /* kutils.m */,
@@ -1436,6 +1445,9 @@
 				F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */,
 				F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */,
 				F1A000FB2E90000200D5A0FB /* DebugLogWriter.swift in Sources */,
+				F1A001012E90000200D5A101 /* ContainerStore.swift in Sources */,
+				F1A001032E90000200D5A103 /* ContainerBrowserLogic.swift in Sources */,
+				F1A001052E90000200D5A105 /* PatchPathValidator.swift in Sources */,
 				F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */,
 				F1A000142E90000200D5A014 /* krw.m in Sources */,
 				F1A000152E90000200D5A015 /* kutils.m in Sources */,

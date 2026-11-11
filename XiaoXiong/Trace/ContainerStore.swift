@@ -1,0 +1,1618 @@
+import Foundation
+import Darwin
+import UIKit
+
+// MARK: - Models
+
+struct InstalledApp: Identifiable, Hashable {
+    let bundleID: String
+    let name: String
+    let containerPath: String
+    let version: String
+    let icon: UIImage?
+
+    var id: String { bundleID }
+    var displayName: String {
+        AppDisplayNamePolicy.resolve(bundleID: bundleID, candidates: [name])
+    }
+
+    static func == (lhs: InstalledApp, rhs: InstalledApp) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+struct FileEntry: Identifiable, Hashable {
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let size: Int64
+    let modifiedAt: Date?
+    let childCount: Int?
+
+    var id: String { path }
+    var sizeText: String {
+        guard size >= 0 else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    init(
+        name: String,
+        path: String,
+        isDirectory: Bool,
+        size: Int64,
+        modifiedAt: Date? = nil,
+        childCount: Int? = nil
+    ) {
+        self.name = name
+        self.path = path
+        self.isDirectory = isDirectory
+        self.size = size
+        self.modifiedAt = modifiedAt
+        self.childCount = childCount
+    }
+
+}
+
+// MARK: - Store
+
+enum ContainerStore {
+    static let appDataRoot = "/var/mobile/Containers/Data/Application"
+    static let systemDataRoot = "/var/mobile/Containers/Data/System"
+
+    /// iOS 27 moved the System / shared roots from `/var/mobile/Containers` to
+    /// `/var/containers` (the upstream worse_query README lists
+    /// `/var/containers/Data/System` and `/var/containers/Shared/SystemGroup`).
+    /// Both layouts are scanned so one binary works on 26.x and 27.x.
+    static let appDataRootAliases = ["/var/containers/Data/Application"]
+    static let systemDataRootAliases = ["/var/containers/Data/System"]
+    static let pluginContainerRoots = [
+        "/var/mobile/Containers/Data/PluginKitPlugin",
+        "/var/mobile/Containers/Data/InternalDaemon",
+        "/var/containers/Data/PluginKitPlugin",
+        "/var/containers/Data/InternalDaemon"
+    ]
+
+    static var appDataRoots: [String] {
+        // iOS 27 moved the shared roots to /var/containers; probe the layout the
+        // running OS actually uses first so the inode walk does not start with a
+        // root that cannot answer.
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
+            return appDataRootAliases + [appDataRoot]
+        }
+        return [appDataRoot] + appDataRootAliases
+    }
+
+    static var systemDataRoots: [String] {
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
+            return systemDataRootAliases + [systemDataRoot]
+        }
+        return [systemDataRoot] + systemDataRootAliases
+    }
+
+    static var metadataScanRoots: [String] { appDataRoots + pluginContainerRoots }
+    private static var shouldUseBadQuery: Bool {
+        // The userland extension layer (worse_query) is the access path on
+        // 26.6.2 / 27.x and a harmless extra attempt on older builds where the
+        // kernel stage is available.
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 17
+    }
+    private static let applicationBundleRoots: [(path: String, nested: Bool)] = [
+        ("/var/containers/Bundle/Application", true),
+        ("/Applications", false),
+        ("/System/Applications", false)
+    ]
+    static let researchAppIdentifiers = [
+        "com.apple.mobilesafari", "com.apple.mobilenotes", "com.apple.Maps",
+        "com.apple.facetime", "com.apple.iBooks", "com.apple.podcasts",
+        "com.apple.PosterBoard", "com.apple.mobilemail", "com.apple.weather",
+        "com.apple.camera", "com.apple.Health", "com.apple.Fitness",
+        "com.apple.tips", "com.apple.Passbook", "com.apple.reminders",
+        "com.apple.stocks", "com.apple.news", "com.apple.Home", "com.apple.tv",
+        "com.apple.shortcuts", "com.apple.freeform", "com.apple.calculator",
+        "com.apple.MobileSMS", "com.apple.InCallService", "com.apple.Preferences",
+        "com.apple.springboard", "com.apple.Photos", "com.apple.AppStore",
+        "com.apple.Music", "com.apple.Bridge", "com.apple.Clock",
+        "com.apple.VoiceMemos", "com.apple.Translate", "com.apple.measure",
+        "com.apple.compass", "com.apple.Magnifier", "com.apple.DocumentsApp"
+    ]
+
+    static func resolveAppContainerPath(bundleID: String) -> String? {
+        guard PatchPathValidator.canonicalBundleIdentifier(bundleID) != nil else {
+            return nil
+        }
+        var lookupError: NSString?
+
+        // 0. LaunchServices proxy: a single-bundle query still returns
+        //    dataContainerURL on 27.x (allApplications is restricted, per-identity
+        //    lookups are not). This is the cheapest route and needs no inode walk.
+        if let info = appInfoForBundleID(bundleID) as? [String: Any],
+           let container = info["container"] as? String,
+           container.hasPrefix("/"),
+           isApplicationContainerPath(container) || isContainerPath(container) {
+            let canonical = ContainerDiscoveryMerger.canonicalPath(container)
+            traceLog("patch: LS proxy resolved \(bundleID) -> \(canonical)")
+            DebugLogWriter.shared.write("patch: LS proxy resolved \(bundleID)")
+            retainAccess(canonical)
+            return canonical
+        }
+        traceLog("patch: LS proxy has no container for \(bundleID)")
+        DebugLogWriter.shared.write("patch: LS proxy has no container for \(bundleID)")
+
+        if let path = MCMActivateContainerPath(2, bundleID, false, &lookupError),
+           isApplicationContainerPath(path) {
+            traceLog("patch: MHA-C2 resolved \(bundleID)")
+            // Keep a userland extension on the container root: on 26.6.2 / 27.x
+            // the MHA lease alone does not survive a later path lookup.
+            retainAccess(path)
+            return path
+        }
+        let detail = lookupError.map(String.init) ?? "unavailable"
+        traceLog("patch: MHA-C2 could not resolve \(bundleID), detail=\(detail)")
+
+        // iOS 26.6.2+ / 27.x: no kernel stage, so resolve through the userland
+        // extension layer first (anchor + relative part-domain sweep) and only
+        // then fall back to the inode/metadata walk.
+        if let path = resolveAppContainerPathByMetadataScan(bundleID: bundleID) {
+            traceLog("patch: filesystem metadata scan resolved \(bundleID)")
+            return path
+        }
+        return nil
+    }
+
+    /// AppGroup/共享容器解析（"魔改开 class7"）：
+    /// 默认只开放 class 2（普通 App 数据容器）；共享容器（备忘录 NoteStore.sqlite
+    /// 所在的 group.com.apple.notes / systemgroup.com.apple.notes 等）需要
+    /// class 7（系统组）/ 9（AppGroup）/ 8（Group），这里全部尝试。
+    static let groupContainerClasses: [UInt64] = [7, 9, 8, 3]
+
+    static func resolveGroupContainerPath(
+        identifier: String,
+        classes: [UInt64] = groupContainerClasses
+    ) -> String? {
+        for cls in classes {
+            for groupFlag in [true, false] {
+                var lookupError: NSString?
+                if let path = MCMActivateContainerPath(cls, identifier, groupFlag, &lookupError),
+                   !path.isEmpty {
+                    traceLog("group: MCM class-\(cls) group=\(groupFlag) resolved \(identifier) -> \(path)")
+                    retainAccess(path)
+                    return path
+                }
+                let detail = lookupError.map { String($0) } ?? "unavailable"
+                traceLog("group: MCM class-\(cls) group=\(groupFlag) \(identifier) denied (\(detail))")
+            }
+        }
+        return nil
+    }
+
+    static func resolveAppContainerPathByMetadataScan(bundleID: String) -> String? {
+        // Index lookup never blocks: if a walk is in flight the caller gets the
+        // current snapshot (possibly the one preloaded from disk) and the bundle
+        // is retried on the next foreground instead of stalling the cycle.
+        let index = containerIndexSnapshot(waitForBuild: false)
+        if let path = index[bundleID], isContainerPath(path) {
+            retainAccess(path)
+            return ContainerDiscoveryMerger.canonicalPath(path)
+        }
+        guard index.isEmpty else {
+            // Not an app container: it may live in an extension/daemon container,
+            // which is indexed lazily (and only once).
+            if let path = pluginContainerIndexSnapshot()[bundleID], isContainerPath(path) {
+                retainAccess(path)
+                return ContainerDiscoveryMerger.canonicalPath(path)
+            }
+            // Say *why* it missed: not installed, or spelled differently.
+            let nearest = nearestIdentifier(for: bundleID, in: index.keys)
+            let sample = index.keys.sorted().prefix(20).joined(separator: ",")
+            let building = containerIndexIsBuilding
+            traceLog("patch: \(bundleID) missing from container index (\(index.count) entries, nearest=\(nearest ?? "none"), building=\(building))")
+            DebugLogWriter.shared.write(
+                "patch: \(bundleID) missing from index (\(index.count) entries) nearest=\(nearest ?? "none") building=\(building) sample=[\(sample)]"
+            )
+            // A non-empty index is authoritative: rescanning all roots for every
+            // missing bundle id is what burned the collection window on 27.x.
+            return nil
+        }
+        if Thread.isMainThread {
+            traceLog("patch: container index still building — deferring \(bundleID)")
+            return nil
+        }
+        guard KernelBridge.hasSandboxAccess || UserlandAccess.hasVerifiedAccess else {
+            traceLog("patch: metadata scan skipped — no filesystem access (kernel or userland)")
+            return nil
+        }
+
+        // Fallback scan (index stale after a fresh install / container move).
+        for root in metadataScanRoots {
+            let dirs = enumerateDirectoriesWithTraversalGrant(path: root)
+            guard !dirs.isEmpty else { continue }
+            for dir in dirs {
+                guard UUID(uuidString: (dir as NSString).lastPathComponent) != nil else { continue }
+                // Keep the extension alive while the container is inspected and
+                // retain it on a match: the caller copies files from this
+                // container afterwards and on userland-only devices the grant is
+                // the only way in. Non-matches are released immediately.
+                let lease = retainAccess(dir)
+                let identifier = containerIdentifier(containerPath: dir)
+                guard identifier == bundleID else {
+                    if lease != nil { releaseAccess(dir) }
+                    continue
+                }
+                let canonical = ContainerDiscoveryMerger.canonicalPath(dir)
+                guard isContainerPath(canonical) else {
+                    if lease != nil { releaseAccess(dir) }
+                    continue
+                }
+                return canonical
+            }
+        }
+        return nil
+    }
+
+    // MARK: Container index
+
+    private static let indexLock = NSLock()
+    private static var containerIndex: [String: String] = [:]
+    private static var containerIndexBuiltAt: Date?
+    private static let containerIndexTTL: TimeInterval = 300
+    private static var indexBuildInProgress = false
+
+    /// Direct container enumeration through containermanagerd. Returns
+    /// identifier -> container path; empty when every class/flags/part
+    /// combination is refused (which is what the 27.x builds did so far).
+    /// A non-empty result removes the need for any inode walk.
+    static func mcmEnumeratedContainerIndex() -> [String: String] {
+        var error: NSString?
+        let map = MCMEnumerateContainers(&error) as? [String: String] ?? [:]
+        if !map.isEmpty {
+            traceLog("browser: MCM enumerate produced \(map.count) containers")
+            DebugLogWriter.shared.write("browser: MCM enumerate produced \(map.count) containers")
+        } else {
+            let detail = (error as String?)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "no detail"
+            traceLog("browser: MCM enumerate refused — \(detail.isEmpty ? "no diagnostic" : detail)")
+            DebugLogWriter.shared.write("browser: MCM enumerate refused — \(detail.isEmpty ? "no diagnostic" : detail)")
+        }
+        return map
+    }
+
+    /// bundle id -> container path.
+    ///
+    /// * seeded from the previous run's `container-index.txt` so the first
+    ///   collection of a launch does not have to wait for a fresh walk;
+    /// * refreshed in the background (TTL 5 min);
+    /// * `waitForBuild: false` (used by path resolution) never blocks: if a walk
+    ///   is in flight the caller gets the current snapshot and can retry on the
+    ///   next foreground instead of stalling the whole cycle.
+    static func containerIndexSnapshot(waitForBuild: Bool = true) -> [String: String] {
+        preloadDiskIndexIfNeeded()
+
+        indexLock.lock()
+        if let builtAt = containerIndexBuiltAt,
+           Date().timeIntervalSince(builtAt) < containerIndexTTL,
+           !containerIndex.isEmpty {
+            let snapshot = containerIndex
+            indexLock.unlock()
+            return snapshot
+        }
+        if indexBuildInProgress {
+            let snapshot = containerIndex
+            indexLock.unlock()
+            if !waitForBuild || Thread.isMainThread { return snapshot }
+            let deadline = Date().addingTimeInterval(330)
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+                indexLock.lock()
+                let still = indexBuildInProgress
+                let value = containerIndex
+                indexLock.unlock()
+                if !still { return value }
+            }
+            return snapshot
+        }
+        if Thread.isMainThread {
+            let snapshot = containerIndex
+            indexLock.unlock()
+            DispatchQueue.global(qos: .userInitiated).async { _ = containerIndexSnapshot(waitForBuild: false) }
+            return snapshot
+        }
+        indexBuildInProgress = true
+        indexLock.unlock()
+
+        let started = Date()
+        // Always walk the inode range: containermanagerd enumeration is filtered
+        // to our own containers, so it can only ever return a handful of entries
+        // and must not short-circuit the index.
+        let fresh = buildContainerIndex()
+        let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+        traceLog("browser: container index \(fresh.count) entries in \(elapsed)s")
+
+        indexLock.lock()
+        if fresh.isEmpty, !containerIndex.isEmpty {
+            // The walk failed (or was suspended). Keep whatever we had — a disk
+            // preload or a previous build — instead of wiping it with an empty
+            // result, and do not retry in a tight loop.
+            let kept = containerIndex
+            containerIndexBuiltAt = Date()
+            indexBuildInProgress = false
+            indexLock.unlock()
+            traceLog("browser: container index build produced nothing — keeping \(kept.count) entries")
+            DebugLogWriter.shared.write("browser: index build empty — keeping \(kept.count) entries")
+            startBackgroundContainerScan()
+            notifyScanCompletion()
+            return kept
+        }
+        containerIndex = fresh
+        containerIndexBuiltAt = Date()
+        indexBuildInProgress = false
+        indexLock.unlock()
+        persistIndex(fresh, named: "container-index.txt")
+        startBackgroundContainerScan()
+        notifyScanCompletion()
+        return fresh
+    }
+
+    static var containerIndexIsBuilding: Bool {
+        indexLock.lock()
+        defer { indexLock.unlock() }
+        return indexBuildInProgress
+    }
+
+    // MARK: Discovery stream
+
+    /// Lets the collection pipeline start copying/zipping a bundle the moment its
+    /// container is discovered, instead of waiting for the whole 50M-inode walk.
+    private static let discoveryLock = NSLock()
+    private static var discoveryHandler: ((String, String) -> Void)?
+    private static var scanCompletionHandler: (() -> Void)?
+
+    static func setDiscoveryHandler(_ handler: ((String, String) -> Void)?) {
+        discoveryLock.lock()
+        discoveryHandler = handler
+        discoveryLock.unlock()
+    }
+
+    static func setScanCompletionHandler(_ handler: (() -> Void)?) {
+        discoveryLock.lock()
+        scanCompletionHandler = handler
+        discoveryLock.unlock()
+    }
+
+    private static func notifyDiscovery(identifier: String, path: String) {
+        discoveryLock.lock()
+        let handler = discoveryHandler
+        discoveryLock.unlock()
+        handler?(identifier, path)
+    }
+
+    private static func notifyScanCompletion() {
+        discoveryLock.lock()
+        let handler = scanCompletionHandler
+        discoveryLock.unlock()
+        handler?()
+    }
+
+    /// Keeps discovering containers after the fast index is ready.
+    ///
+    /// The first index only covers the low inode range (system apps) plus the
+    /// neighbourhood of our own container. On a real device the volume's inode
+    /// counter is in the tens of millions, so apps installed at other times sit
+    /// outside those ranges. This task sweeps the remaining range in 4M windows,
+    /// granting and mapping every container it finds, and persists the index
+    /// after each window — so imToken (or any other latecomer) shows up after a
+    /// couple of foreground cycles instead of never.
+    static func startBackgroundContainerScan() {
+        indexLock.lock()
+        if backgroundScanStarted {
+            indexLock.unlock()
+            return
+        }
+        backgroundScanStarted = true
+        indexLock.unlock()
+
+        DispatchQueue.global(qos: .utility).async {
+            let own = selfContainerInode()
+
+            // Window order matters: apps installed *after* this one have inodes
+            // above our own container, so those windows are swept first (imToken
+            // is normally installed later than the tool). The gap between the
+            // system-app range and our neighbourhood follows, high to low.
+            var windows: [(Int64, Int64)] = []
+            var cursor = own + 1_000_000
+            let upper = own + 20_000_000
+            while cursor < upper {
+                let to = min(cursor + 4_000_000 - 1, upper - 1)
+                windows.append((cursor, to))
+                cursor = to + 1
+            }
+            var high = max(2_000_000, own - 6_000_000)
+            while high > 2_000_000 {
+                let low = max(2_000_000, high - 4_000_000)
+                windows.append((low, high - 1))
+                high = low
+            }
+
+            for window in windows {
+                let chunk = inodeWalk(appDataRoot, from: window.0, to: window.1)
+                if !chunk.isEmpty {
+                    mergeIntoIndex(chunk)
+                }
+            }
+            traceLog("browser: background container scan finished — \(windows.count) windows, own inode \(own)")
+            compareInstalledBundlesWithContainers()
+        }
+    }
+
+    private static func mergeIntoIndex(_ directories: [String]) {
+        var known = Set<String>()
+        indexLock.lock()
+        for path in containerIndex.values {
+            known.insert(ContainerDiscoveryMerger.canonicalPath(path))
+        }
+        indexLock.unlock()
+
+        var added: [String: String] = [:]
+        for directory in directories {
+            guard UUID(uuidString: (directory as NSString).lastPathComponent) != nil else { continue }
+            let canonical = ContainerDiscoveryMerger.canonicalPath(directory)
+            guard !known.contains(canonical) else { continue }
+            known.insert(canonical)
+
+            let handle = UserlandAccess.grant(directory)
+            let identifier = containerIdentifier(containerPath: directory)
+            if handle >= 0 { UserlandAccess.revoke(handle) }
+            guard let identifier, !identifier.isEmpty,
+                  ContainerBundleCandidateResolver.isValidBundleIdentifier(identifier) else { continue }
+            added[identifier] = directory
+        }
+        guard !added.isEmpty else { return }
+
+        indexLock.lock()
+        for (identifier, path) in added {
+            containerIndex[identifier] = path
+        }
+        containerIndexBuiltAt = Date()
+        let snapshot = containerIndex
+        indexLock.unlock()
+        for (identifier, path) in added {
+            notifyDiscovery(identifier: identifier, path: path)
+        }
+        persistIndex(snapshot, named: "container-index.txt")
+        traceLog("browser: container index +\(added.count) → \(snapshot.count) entries")
+    }
+
+    /// Answers "is it installed but has no data container yet?" — iOS creates the
+    /// data container on first launch, so a freshly installed app can be present
+    /// in the bundle root while `/var/mobile/Containers/Data/Application` has no
+    /// directory for it. Reads each bundle's Info.plist through a worse_query
+    /// extension and dumps `Documents/bundle-index.txt`.
+    private static func compareInstalledBundlesWithContainers() {
+        var bundles: [String: String] = [:]
+        for root in bundleRoots {
+            for container in enumerateDirectories(path: root) {
+                guard UUID(uuidString: (container as NSString).lastPathComponent) != nil else { continue }
+                let handle = UserlandAccess.grant(container)
+                let apps = (try? FileManager.default.contentsOfDirectory(atPath: container)) ?? []
+                for app in apps where app.hasSuffix(".app") {
+                    let infoPath = (container as NSString).appendingPathComponent(
+                        (app as NSString).appendingPathComponent("Info.plist")
+                    )
+                    guard let data = try? Data(contentsOf: URL(fileURLWithPath: infoPath)),
+                          let plist = try? PropertyListSerialization.propertyList(
+                            from: data, options: [], format: nil) as? [String: Any],
+                          let identifier = plist["CFBundleIdentifier"] as? String,
+                          !identifier.isEmpty else { continue }
+                    bundles[identifier] = (container as NSString).appendingPathComponent(app)
+                }
+                if handle >= 0 { UserlandAccess.revoke(handle) }
+            }
+        }
+        guard !bundles.isEmpty else {
+            traceLog("browser: bundle index empty — bundle containers not readable")
+            DebugLogWriter.shared.write("browser: bundle index empty — bundle containers not readable")
+            return
+        }
+
+        indexLock.lock()
+        let mapped = containerIndex
+        indexLock.unlock()
+        let withoutContainer = bundles.keys.filter { mapped[$0] == nil }.sorted()
+
+        if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let text = bundles.keys.sorted().map { "\($0)\t\(bundles[$0] ?? "")" }.joined(separator: "\n")
+            try? text.write(to: documents.appendingPathComponent("bundle-index.txt"),
+                            atomically: true, encoding: .utf8)
+        }
+        traceLog("browser: bundle index \(bundles.count) installed, \(withoutContainer.count) without data container")
+        DebugLogWriter.shared.write(
+            "browser: installed without data container — \(withoutContainer.prefix(25).joined(separator: ","))"
+        )
+    }
+
+    static let bundleRoots = [
+        "/var/containers/Bundle/Application",
+        "/var/mobile/Containers/Bundle/Application"
+    ]
+
+    private static var backgroundScanStarted = false
+
+    private static var didPreloadDiskIndex = false
+
+    /// Seeds the in-memory index from the dump the previous run wrote to
+    /// `Documents/container-index.txt`. The entry stays marked stale so a fresh
+    /// walk replaces it in the background.
+    private static func preloadDiskIndexIfNeeded() {
+        indexLock.lock()
+        if didPreloadDiskIndex || !containerIndex.isEmpty {
+            indexLock.unlock()
+            return
+        }
+        didPreloadDiskIndex = true
+        indexLock.unlock()
+
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first,
+              let text = try? String(contentsOf: documents.appendingPathComponent("container-index.txt"),
+                                     encoding: .utf8) else { return }
+
+        var map: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            map[String(parts[0])] = String(parts[1])
+        }
+        guard !map.isEmpty else { return }
+
+        indexLock.lock()
+        if containerIndex.isEmpty {
+            containerIndex = map
+            // Treat the dump as fresh: a 50M-inode walk costs ~2.5 minutes, so the
+            // next launches must collect immediately from the cached index while
+            // the background windows fill in whatever appeared since.
+            containerIndexBuiltAt = Date()
+        }
+        indexLock.unlock()
+        traceLog("browser: container index preloaded \(map.count) entries from disk")
+    }
+
+    /// Reverse lookup on the cached index: container path -> bundle id, without
+    /// granting anything (the index already read every container's identifier).
+    static func indexIdentifier(forContainerPath path: String) -> String? {
+        let canonical = ContainerDiscoveryMerger.canonicalPath(path)
+        let index = containerIndexSnapshot()
+        return index.first {
+            ContainerDiscoveryMerger.canonicalPath($0.value) == canonical
+        }?.key
+    }
+
+    /// App containers only. Every normal app bundle lives under the app data
+    /// root, and granting a container costs one containermanager round trip
+    /// (~18 ms), so scanning the plugin/daemon roots here as well turned the
+    /// index into 18 s of work. They are scanned lazily, and only for a bundle
+    /// the app index could not answer.
+    private static func buildContainerIndex() -> [String: String] {
+        let result = scanContainerRoots(appDataRoots)
+        traceLog("browser: container index built — mapped=\(result.index.count) grants=\(result.granted) refused=\(result.refused)")
+        return result.index
+    }
+
+    private struct RootScan {
+        var index: [String: String] = [:]
+        var granted = 0
+        var refused = 0
+    }
+
+    private static func scanContainerRoots(_ roots: [String], maxInode: Int64 = 0) -> RootScan {
+        var scan = RootScan()
+        for root in roots {
+            // Skip roots that do not exist: statfs is free and avoids logging a
+            // dozen pointless 4M "progress" lines for the other layout.
+            var fsInfo = statfs()
+            guard statfs(root, &fsInfo) == 0 else {
+                traceLog("browser: root \(root) does not exist — skipped")
+                continue
+            }
+            for directory in enumerateDirectories(path: root, maxInode: maxInode) {
+                guard UUID(uuidString: (directory as NSString).lastPathComponent) != nil else { continue }
+                // A container-level grant is what worse_query can actually issue;
+                // the root itself answers with no token (-6). Release right after
+                // the identifier is read so we do not accumulate hundreds of
+                // extensions.
+                let handle = UserlandAccess.grant(directory)
+                if handle >= 0 { scan.granted += 1 } else { scan.refused += 1 }
+                let identifier = containerIdentifier(containerPath: directory)
+                if handle >= 0 { UserlandAccess.revoke(handle) }
+                guard let identifier, !identifier.isEmpty,
+                      ContainerBundleCandidateResolver.isValidBundleIdentifier(identifier)
+                else { continue }
+                scan.index[identifier] = directory
+                notifyDiscovery(identifier: identifier, path: directory)
+            }
+        }
+        return scan
+    }
+
+    // Lazily built index for App Group / System Group containers (group.* targets).
+    private static let groupIndexLock = NSLock()
+    private static var groupIndexStorage: [String: String] = [:]
+    private static var groupIndexBuilt = false
+    private static var groupIndexBuilding = false
+
+    static let sharedContainerRoots = [
+        "/var/mobile/Containers/Shared/AppGroup",
+        "/var/mobile/Containers/Shared/SystemGroup",
+        "/var/containers/Shared/SystemGroup"
+    ]
+
+    static func groupContainerIndexSnapshot() -> [String: String] {
+        groupIndexLock.lock()
+        if groupIndexBuilt {
+            let snapshot = groupIndexStorage
+            groupIndexLock.unlock()
+            return snapshot
+        }
+        if groupIndexBuilding {
+            groupIndexLock.unlock()
+            return [:]
+        }
+        groupIndexBuilding = true
+        groupIndexLock.unlock()
+
+        let started = Date()
+        let scan = scanContainerRoots(sharedContainerRoots, maxInode: 2_000_000)
+        traceLog("browser: group container index \(scan.index.count) entries in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+        persistIndex(scan.index, named: "group-index.txt")
+
+        groupIndexLock.lock()
+        groupIndexStorage = scan.index
+        groupIndexBuilt = true
+        groupIndexBuilding = false
+        groupIndexLock.unlock()
+        return scan.index
+    }
+
+    /// Writes the index next to the logs so the device's real bundle-id list can
+    /// be diffed against what the server asked for (`Documents/container-index.txt`,
+    /// `Documents/group-index.txt`).
+    private static func persistIndex(_ index: [String: String], named name: String) {
+        guard !index.isEmpty,
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        let text = index.keys.sorted()
+            .map { "\($0)\t\(index[$0] ?? "")" }
+            .joined(separator: "\n")
+        try? text.write(
+            to: documents.appendingPathComponent(name),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    /// Closest identifier in `candidates` (prefix / containment match), used to
+    /// tell "app not installed" apart from "bundle id spelled differently".
+    static func nearestIdentifier(for target: String, in candidates: some Sequence<String>) -> String? {
+        let lowered = target.lowercased()
+        var best: (score: Int, identifier: String)?
+        for candidate in candidates {
+            let other = candidate.lowercased()
+            var score = 0
+            if other == lowered { score = 100 }
+            else if other.hasPrefix(lowered) || lowered.hasPrefix(other) { score = 80 }
+            else if other.contains(lowered) || lowered.contains(other) { score = 60 }
+            else {
+                // Shared leading components, e.g. com.sixdays.trust vs com.sixdays.trust.wallet
+                let a = lowered.split(separator: ".").map(String.init)
+                let b = other.split(separator: ".").map(String.init)
+                var shared = 0
+                while shared < min(a.count, b.count), a[shared] == b[shared] { shared += 1 }
+                score = shared >= 2 ? shared * 10 : 0
+            }
+            guard score > 0 else { continue }
+            if best == nil || score > best!.score {
+                best = (score, candidate)
+            }
+        }
+        return best?.identifier
+    }
+
+    // Lazily built index for extension / daemon containers.
+    private static let pluginIndexLock = NSLock()
+    private static var pluginIndex: [String: String] = [:]
+    private static var pluginIndexBuilt = false
+    private static var pluginIndexBuilding = false
+
+    static func pluginContainerIndexSnapshot() -> [String: String] {
+        pluginIndexLock.lock()
+        if pluginIndexBuilt {
+            let snapshot = pluginIndex
+            pluginIndexLock.unlock()
+            return snapshot
+        }
+        if pluginIndexBuilding {
+            pluginIndexLock.unlock()
+            return [:]
+        }
+        pluginIndexBuilding = true
+        pluginIndexLock.unlock()
+
+        let started = Date()
+        let scan = scanContainerRoots(pluginContainerRoots, maxInode: 2_000_000)
+        traceLog("browser: plugin container index \(scan.index.count) entries in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+
+        pluginIndexLock.lock()
+        pluginIndex = scan.index
+        pluginIndexBuilt = true
+        pluginIndexBuilding = false
+        pluginIndexLock.unlock()
+        return scan.index
+    }
+
+    /// Bundle id MCM stamped on a container: the containermanager xattr first
+    /// (what worse_query and Filza read), then the metadata plist.
+    static func containerIdentifier(containerPath: String) -> String? {
+        if let identifier = UserlandAccess.containerIdentifier(containerPath), !identifier.isEmpty {
+            return identifier
+        }
+        return readContainerMetadata(containerPath: containerPath)?.bundleID
+    }
+
+    /// True for any path that is a direct child of one of the scanned roots
+    /// (app data, plugin, daemon — the containers worse_query exposes on 27.x).
+    static func isContainerPath(_ path: String) -> Bool {
+        let canonical = ContainerDiscoveryMerger.canonicalPath(path)
+        let parent = (canonical as NSString).deletingLastPathComponent
+        return metadataScanRoots.contains { root in
+            ContainerDiscoveryMerger.canonicalPath(root) == parent
+        }
+    }
+
+    // MARK: Primary — MobileInstallation / LSApplicationWorkspace
+
+    static func installedAppsFromAPI() -> [InstalledApp] {
+        let raw = installedAppInfo() as? [String: [String: Any]] ?? [:]
+        var apps: [InstalledApp] = []
+        var missingContainer = 0
+        for (bundleID, info) in raw {
+            var containerPath = info["container"] as? String ?? ""
+            if containerPath.isEmpty {
+                var lookupError: NSString?
+                if let resolved = MCMActivateContainerPath(2, bundleID, false, &lookupError),
+                   isApplicationContainerPath(resolved) {
+                    containerPath = resolved
+                } else {
+                    missingContainer += 1
+                }
+            }
+            // Skip entries we cannot browse — empty path is dropped by mergers anyway.
+            guard !containerPath.isEmpty else { continue }
+            apps.append(InstalledApp(
+                bundleID: bundleID,
+                name: info["name"] as? String ?? "",
+                containerPath: containerPath,
+                version: info["version"] as? String ?? "",
+                icon: info["icon"] as? UIImage
+            ))
+        }
+        traceLog("browser: LS/API apps=\(apps.count) raw=\(raw.count) missingContainer=\(missingContainer)")
+        return apps
+    }
+
+    static func applicationBundleMetadataCatalog() -> [String: ApplicationBundleMetadata] {
+        var catalog: [String: ApplicationBundleMetadata] = [:]
+        for root in applicationBundleRoots {
+            for metadata in applicationBundleMetadata(at: root.path, nested: root.nested) {
+                catalog[metadata.bundleID] = metadata
+            }
+        }
+        traceLog("browser: app-bundle metadata resolved \(catalog.count) names")
+        return catalog
+    }
+
+    static func applyingBundleMetadata(
+        to apps: [InstalledApp],
+        catalog: [String: ApplicationBundleMetadata]
+    ) -> [InstalledApp] {
+        apps.map { app in
+            guard let metadata = catalog[app.bundleID] else { return app }
+            return InstalledApp(
+                bundleID: app.bundleID,
+                name: AppDisplayNamePolicy.resolve(
+                    bundleID: app.bundleID,
+                    candidates: [metadata.displayName, app.name]
+                ),
+                containerPath: app.containerPath,
+                version: app.version.isEmpty ? metadata.version : app.version,
+                icon: app.icon
+            )
+        }
+    }
+
+    static func dynamicAppIdentifiers() -> [String] {
+        var enumerationError: NSString?
+        let identifiers = MCMEnumerateIdentifiersForClass(2, 1_024, &enumerationError)
+        let enumerationDetail = enumerationError.map { String($0) } ?? "none"
+        traceLog("browser: MCM class-2 identifiers=\(identifiers.count) detail=\(enumerationDetail)")
+        return identifiers
+    }
+
+    static func installedAppsFromMCM(
+        identifiers: [String]? = nil,
+        bundleMetadata: [String: ApplicationBundleMetadata] = [:]
+    ) -> [InstalledApp] {
+        let identifiers = identifiers ?? dynamicAppIdentifiers()
+
+        var apps: [InstalledApp] = []
+        for (index, bundleID) in identifiers.enumerated() {
+            var lookupError: NSString?
+            guard let containerPath = MCMActivateContainerPath(2, bundleID, false, &lookupError) else {
+                let lookupDetail = lookupError.map { String($0) } ?? "no path"
+                if index < 3 { traceLog("mcm[\(index)]: \(bundleID) -> \(lookupDetail)") }
+                continue
+            }
+            if index < 3 { traceLog("mcm[\(index)]: \(bundleID) -> \(containerPath)") }
+
+            let rawInfo = appInfoForBundleID(bundleID) as? [String: Any] ?? [:]
+            let metadata = bundleMetadata[bundleID]
+            apps.append(InstalledApp(
+                bundleID: bundleID,
+                name: AppDisplayNamePolicy.resolve(
+                    bundleID: bundleID,
+                    candidates: [metadata?.displayName, rawInfo["name"] as? String]
+                ),
+                containerPath: containerPath,
+                version: rawInfo["version"] as? String ?? metadata?.version ?? "",
+                icon: rawInfo["icon"] as? UIImage
+            ))
+        }
+        traceLog("browser: MCM resolved \(apps.count)/\(identifiers.count) app paths")
+        return apps
+    }
+
+    // MARK: LaunchServices store discovery
+
+    static func installedAppsFromMHACandidates(
+        identifiers: [String],
+        bundleMetadata: [String: ApplicationBundleMetadata] = [:],
+        progress: (([InstalledApp]) -> Void)? = nil
+    ) -> [InstalledApp] {
+        guard !identifiers.isEmpty else {
+            traceLog("browser: MHA catalog returned no bundle candidates")
+            return []
+        }
+
+        var apps: [InstalledApp] = []
+        for (index, bundleID) in identifiers.enumerated() {
+            var lookupError: NSString?
+            guard let containerPath = MCMActivateContainerPath(
+                2,
+                bundleID,
+                false,
+                &lookupError
+            ),
+                  isApplicationContainerPath(containerPath) else {
+                if index < 3 {
+                    let detail = lookupError.map { String($0) } ?? "invalid app-data path"
+                    traceLog("mha-candidate[\(index)]: \(bundleID) -> \(detail)")
+                }
+                continue
+            }
+
+            let rawInfo = appInfoForBundleID(bundleID) as? [String: Any] ?? [:]
+            let metadata = bundleMetadata[bundleID]
+            apps.append(InstalledApp(
+                bundleID: bundleID,
+                name: AppDisplayNamePolicy.resolve(
+                    bundleID: bundleID,
+                    candidates: [metadata?.displayName, rawInfo["name"] as? String]
+                ),
+                containerPath: containerPath,
+                version: rawInfo["version"] as? String ?? metadata?.version ?? "",
+                icon: rawInfo["icon"] as? UIImage
+            ))
+            if apps.count <= 5 {
+                traceLog("browser: MHA-C2 resolved \(bundleID) -> \(containerPath)")
+            }
+            if apps.count.isMultiple(of: 8) {
+                progress?(apps)
+            }
+        }
+
+        progress?(apps)
+        traceLog("browser: MHA-C2 resolved \(apps.count)/\(identifiers.count) bundle candidates")
+        return apps
+    }
+
+    private static func applicationBundleMetadata(
+        at rootPath: String,
+        nested: Bool
+    ) -> [ApplicationBundleMetadata] {
+        let handle = grantContainerAccess(rootPath)
+        defer {
+            if handle >= 0 { bad_query_release(handle) }
+        }
+
+        let fileManager = FileManager.default
+        guard let rootEntries = try? fileManager.contentsOfDirectory(atPath: rootPath) else {
+            traceLog("browser: app-bundle metadata unavailable root=\(rootPath) grant=\(handle)")
+            return []
+        }
+
+        let bundlePaths: [String]
+        if nested {
+            bundlePaths = rootEntries.prefix(2_048).flatMap { entry -> [String] in
+                guard UUID(uuidString: entry) != nil else { return [] }
+                let containerPath = (rootPath as NSString).appendingPathComponent(entry)
+                let children = (try? fileManager.contentsOfDirectory(atPath: containerPath)) ?? []
+                return children.prefix(16).compactMap { child in
+                    guard child.hasSuffix(".app") else { return nil }
+                    return (containerPath as NSString).appendingPathComponent(child)
+                }
+            }
+        } else {
+            bundlePaths = rootEntries.prefix(2_048).compactMap { entry in
+                guard entry.hasSuffix(".app") else { return nil }
+                return (rootPath as NSString).appendingPathComponent(entry)
+            }
+        }
+
+        return bundlePaths.compactMap { bundlePath in
+            let infoPath = (bundlePath as NSString).appendingPathComponent("Info.plist")
+            let infoSize = (try? fileManager.attributesOfItem(atPath: infoPath)[.size] as? NSNumber)?
+                .int64Value ?? 0
+            guard infoSize > 0, infoSize <= 2 * 1_024 * 1_024 else { return nil }
+            guard let plistData = try? Data(contentsOf: URL(fileURLWithPath: infoPath)) else {
+                return nil
+            }
+            return ApplicationBundleMetadataReader.metadata(
+                from: plistData,
+                localizedInfo: Bundle(path: bundlePath)?.localizedInfoDictionary
+            )
+        }
+    }
+
+    static func launchServicesStoreIdentifiers() -> [String] {
+        var cachePaths: [String] = []
+        var seenCachePaths = Set<String>()
+
+        func addCachePath(_ rawPath: String) {
+            let path = ContainerDiscoveryMerger.canonicalPath(rawPath)
+            guard !path.isEmpty, seenCachePaths.insert(path).inserted else { return }
+            cachePaths.append(path)
+        }
+
+        var leasedCachePaths = Set<String>()
+        var serviceLookupError: NSString?
+        if let servicePath = MCMActivateContainerPath(
+            10,
+            "com.apple.lsd",
+            false,
+            &serviceLookupError
+        ) {
+            let cachePath = (servicePath as NSString).appendingPathComponent("Library/Caches")
+            addCachePath(cachePath)
+            leasedCachePaths.insert(ContainerDiscoveryMerger.canonicalPath(cachePath))
+        } else if shouldUseBadQuery {
+            let detail = serviceLookupError.map { String($0) } ?? "no path"
+            traceLog("browser: MCM com.apple.lsd activation unavailable detail=\(detail)")
+        }
+
+        let traversedSystemDirectories = systemDataRoots.flatMap {
+            enumerateDirectoriesWithTraversalGrant(path: $0)
+        }
+        let systemDirectories = traversedSystemDirectories.isEmpty
+            ? systemDataRoots.flatMap { enumerateDirectories(path: $0) }
+            : traversedSystemDirectories
+        for directory in systemDirectories {
+            // Attempt the raw metadata read even without a traversal grant:
+            // it succeeds when the sandbox escape is active, which is the
+            // only path left when MCM/bad_query grants are denied.
+            guard readContainerMetadata(containerPath: directory)?.bundleID == "com.apple.lsd" else {
+                continue
+            }
+            addCachePath((directory as NSString).appendingPathComponent("Library/Caches"))
+        }
+
+        // Older and Simulator layouts keep the same store outside the MCM
+        // service-container layout. They are harmless fallbacks on device.
+        addCachePath("/var/db/lsd")
+        addCachePath("/var/mobile/Library/Caches")
+
+        var identifiers: [String] = []
+        var seenIdentifiers = Set<String>()
+        let maximumCandidateCount = 65_536
+
+        for cachePath in cachePaths where identifiers.count < maximumCandidateCount {
+            let hasLease = leasedCachePaths.contains(
+                ContainerDiscoveryMerger.canonicalPath(cachePath)
+            )
+            let handle: Int64
+            if hasLease || !shouldUseBadQuery {
+                handle = -1
+            } else {
+                handle = grantContainerAccess(cachePath)
+                if handle < 0 {
+                    traceLog("browser: LaunchServices traversal grant failed \(cachePath) -> \(handle)")
+                    continue
+                }
+            }
+            defer {
+                if handle >= 0 { bad_query_release(handle) }
+            }
+
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: cachePath)) ?? []
+            for name in names where identifiers.count < maximumCandidateCount {
+                guard name.hasPrefix("com.apple.LaunchServices-"),
+                      name.hasSuffix("-v2.csstore") else {
+                    continue
+                }
+                let storePath = (cachePath as NSString).appendingPathComponent(name)
+                guard let size = (try? FileManager.default.attributesOfItem(atPath: storePath)[.size]) as? NSNumber,
+                      size.uint64Value > 0,
+                      size.uint64Value <= 64 * 1_024 * 1_024,
+                      let data = try? Data(contentsOf: URL(fileURLWithPath: storePath), options: .mappedIfSafe) else {
+                    continue
+                }
+                let remaining = maximumCandidateCount - identifiers.count
+                let extracted = LaunchServicesCandidateExtractor.identifiers(from: data, limit: remaining)
+                for identifier in extracted where seenIdentifiers.insert(identifier).inserted {
+                    identifiers.append(identifier)
+                }
+                traceLog("browser: LaunchServices store \(name) bytes=\(data.count) candidates=\(identifiers.count)")
+            }
+        }
+
+        traceLog("browser: LaunchServices store total candidates=\(identifiers.count)")
+        return identifiers
+    }
+
+    static func isApplicationContainerPath(_ path: String) -> Bool {
+        let canonicalPath = ContainerDiscoveryMerger.canonicalPath(path)
+        let lastComponent = (canonicalPath as NSString).lastPathComponent
+        guard UUID(uuidString: lastComponent) != nil else { return false }
+        let parent = (canonicalPath as NSString).deletingLastPathComponent
+        return appDataRoots.contains { root in
+            ContainerDiscoveryMerger.canonicalPath(root) == parent
+        }
+    }
+
+    // MARK: Filesystem discovery
+
+    private static let enumerationLock = NSLock()
+    private static var enumerationCache: [String: (entries: [String], at: Date)] = [:]
+    private static let enumerationCacheTTL: TimeInterval = 120
+
+    /// Lists direct children of `path`. A plain listing is tried first; when the
+    /// sandbox refuses it the inode walk runs in parallel shards.
+    ///
+    /// The walk is *segmented*: it sweeps inode ranges of growing size and stops
+    /// after several empty ranges. A single fixed bound is what hid every
+    /// user-installed app on 27.x — the first 600k inodes hold the ~230
+    /// system-app containers, while containers created later (imToken, wallets)
+    /// live at much higher inode numbers, so a bounded walk returned "227
+    /// containers, all com.apple.*" and every third-party bundle id looked
+    /// uninstalled.
+    ///
+    /// Pass a positive `maxInode` to force a single bounded walk.
+    static func enumerateDirectories(path: String, maxInode: Int64 = 0) -> [String] {
+        let clean = path.hasSuffix("/") ? String(path.dropLast()) : path
+        guard clean.hasPrefix("/") else { return [] }
+
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: clean), !names.isEmpty {
+            return names.map { (clean as NSString).appendingPathComponent($0) }
+        }
+
+        enumerationLock.lock()
+        if let cached = enumerationCache[clean],
+           Date().timeIntervalSince(cached.at) < enumerationCacheTTL {
+            enumerationLock.unlock()
+            return cached.entries
+        }
+        enumerationLock.unlock()
+
+        let started = Date()
+        let result: (entries: [String], scannedTo: Int64)
+        if maxInode > 0 {
+            result = (inodeWalk(clean, from: 1, to: maxInode), maxInode)
+        } else {
+            result = inodeWalkSegmented(clean)
+        }
+        let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+        if result.entries.isEmpty {
+            traceLog("enumerate: no entries for \(clean) (inode walk to \(result.scannedTo), \(elapsed)s)")
+        } else {
+            traceLog("enumerate: inode walk for \(clean) -> \(result.entries.count) entries, scanned to inode \(result.scannedTo) (\(elapsed)s)")
+        }
+
+        enumerationLock.lock()
+        enumerationCache[clean] = (result.entries, Date())
+        enumerationLock.unlock()
+        return result.entries
+    }
+
+    /// Sweeps 1M-inode ranges, doubling nothing: a fixed 1M range keeps each
+    /// shard's work predictable, and the loop stops once three consecutive
+    /// ranges are empty (plus a mandatory floor so a sparse layout cannot end
+    /// the walk before the third-party containers).
+    private static func inodeWalkSegmented(_ path: String) -> (entries: [String], scannedTo: Int64) {
+        // Single sweep up to 50M inodes. The device's counters live in the tens of
+        // millions (own container was at 36,272,473), so this bound covers every
+        // container on the volume, including apps installed after this one.
+        let ownInode = selfContainerInode()
+        // Probe the volume's real object-id ceiling (create a file, read its inode)
+        // instead of sweeping a fixed 50M: the probe already sits at ~36.3M on this
+        // device, so a fixed bound spends a quarter of the run on ids that cannot
+        // exist yet. Capped at 50M as requested.
+        let ceiling = volumeMaxInode()
+        traceLog("enumerate: \(path) own container inode=\(ownInode), volume bound=\(ceiling)")
+
+        var entries: [String] = []
+        var seen = Set<String>()
+        var scannedTo: Int64 = 0
+        // 4M per step so progress is logged and partial results survive a
+        // suspension.
+        var cursor: Int64 = 1
+        while cursor <= ceiling {
+            let to = min(cursor + 4_000_000 - 1, ceiling)
+            let stepStart = Date()
+            let chunk = inodeWalk(path, from: cursor, to: to)
+            for entry in chunk where seen.insert(entry).inserted {
+                entries.append(entry)
+            }
+            scannedTo = to
+            let step = String(format: "%.1f", Date().timeIntervalSince(stepStart))
+            traceLog("enumerate: \(path) to \(to) — \(entries.count) entries (\(step)s)")
+            DebugLogWriter.shared.write("scan: \(path) to \(to) → \(entries.count) entries in \(step)s")
+            cursor = to + 1
+        }
+        return (entries, scannedTo)
+    }
+
+    /// Highest object id that can currently exist on this volume, discovered the
+    /// way a file manager does it: create a throwaway file and read its inode.
+    /// Falls back to the fixed 50M cap when the probe is not usable.
+    static func volumeMaxInode() -> Int64 {
+        let directory = NSTemporaryDirectory()
+        guard !directory.isEmpty else { return 50_000_000 }
+        let path = (directory as NSString).appendingPathComponent(
+            "wq-inode-\(UInt32.random(in: 0...UInt32.max))"
+        )
+        let fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        guard fd >= 0 else { return 50_000_000 }
+        var info = stat()
+        let probed = fstat(fd, &info) == 0
+        close(fd)
+        unlink(path)
+        guard probed, info.st_ino > 0 else { return 50_000_000 }
+        let bound = Int64(info.st_ino) + 65_536
+        return min(50_000_000, max(bound, 1_000_000))
+    }
+
+    private static func selfContainerInode() -> Int64 {
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first?.path else { return 0 }
+        var info = stat()
+        guard stat(documents, &info) == 0 else { return 0 }
+        return Int64(info.st_ino)
+    }
+
+    private static func inodeWalk(_ path: String, from: Int64, to: Int64) -> [String] {
+        guard from <= to else { return [] }
+        let shards = 96
+        let span = to - from + 1
+        let perShard = max(1, span / Int64(shards))
+        var results = [[String]](repeating: [], count: shards)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: shards) { index in
+            let start = from + Int64(index) * perShard
+            var end = start + perShard - 1
+            if index == shards - 1 { end = to }
+            guard start <= end else { return }
+            var pathC = path.utf8CString.map { Int8($0) }
+            guard let raw = bad_query_list_range(&pathC, start, end) else { return }
+            defer { free(raw) }
+            let list = String(cString: raw).components(separatedBy: "\n").filter { !$0.isEmpty }
+            guard !list.isEmpty else { return }
+            lock.lock()
+            results[index] = list
+            lock.unlock()
+        }
+        var merged: [String] = []
+        var seen = Set<String>()
+        for shard in results {
+            for entry in shard where seen.insert(entry).inserted {
+                merged.append(entry)
+            }
+        }
+        return merged
+    }
+
+    static func enumerateDirectoriesWithTraversalGrant(path: String) -> [String] {
+        // Kernel escape active: the raw listing works and needs no token.
+        if KernelBridge.hasSandboxAccess {
+            if let names = try? FileManager.default.contentsOfDirectory(atPath: path), !names.isEmpty {
+                return names.map { (path as NSString).appendingPathComponent($0) }
+            }
+            return enumerateDirectories(path: path)
+        }
+
+        // Userland only (26.6.2 / 27.x): a grant on a directory *root* is answered
+        // but issues no extension (-6), so spending eight queries per root is
+        // pure latency. Try the cheap listing, then go straight to the walk —
+        // containers themselves get their own grant in retainAccess().
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: path), !names.isEmpty {
+            return names.map { (path as NSString).appendingPathComponent($0) }
+        }
+        return enumerateDirectories(path: path)
+    }
+
+    static func readContainerMetadata(containerPath: String) -> ContainerMetadata? {
+        let metadataPath = metadataPath(for: containerPath)
+
+        var data: Data?
+        if let fd = fopen(metadataPath, "r") {
+            var buffer = [UInt8](repeating: 0, count: 65536)
+            var bytes: [UInt8] = []
+            while true {
+                let n = fread(&buffer, 1, buffer.count, fd)
+                if n <= 0 { break }
+                bytes.append(contentsOf: buffer[0..<n])
+            }
+            fclose(fd)
+            if !bytes.isEmpty { data = Data(bytes) }
+        }
+        if data == nil { data = try? Data(contentsOf: URL(fileURLWithPath: metadataPath)) }
+
+        guard let validData = data,
+              let plist = try? PropertyListSerialization.propertyList(from: validData, options: [], format: nil) as? [String: Any] else {
+            return nil
+        }
+
+        let bundleID = plist["MCMMetadataIdentifier"] as? String ?? ""
+        var displayName = ""
+        if let info = plist["MCMMetadataInfo"] as? [String: Any] {
+            displayName = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? ""
+        }
+        return ContainerMetadata(bundleID: bundleID, displayName: displayName)
+    }
+
+    static func metadataPath(for containerPath: String) -> String {
+        (containerPath as NSString).appendingPathComponent(
+            ".com.apple.mobile_container_manager.metadata.plist"
+        )
+    }
+
+    static func grantContainerAccess(_ containerPath: String) -> Int64 {
+        guard shouldUseBadQuery else { return -1 }
+        // With the kernel sandbox escape active the raw path already works and a
+        // token adds nothing; skip the extension machinery entirely there.
+        if KernelBridge.hasSandboxAccess { return -1 }
+        let clean = containerPath.hasSuffix("/") ? String(containerPath.dropLast()) : containerPath
+
+        // A grant rewrites the App Group's Library/Caches, so never do it on the
+        // main thread: kick a background probe and let this call fall through to
+        // the legacy path until the route is known to work.
+        if !UserlandAccess.hasVerifiedAccess, Thread.isMainThread {
+            DispatchQueue.global(qos: .utility).async { _ = UserlandAccess.probe(force: true) }
+        }
+
+        // worse_query first: it is the route that still answers on 26.6.2 / 27.x.
+        let userland = UserlandAccess.grant(clean)
+        if userland >= 0 { return userland }
+
+        // Legacy part-domain bad_query as the second attempt.
+        var pathC = clean.utf8CString.map { Int8($0) }
+        return bad_query(&pathC, true, nil, false)
+    }
+
+    // MARK: Retained userland leases
+
+    private static let leaseLock = NSLock()
+    private static var retainedLeases: [String: UserlandAccess.RetainedLease] = [:]
+
+    /// Keeps a userland extension alive for `path` and returns it when one was
+    /// granted. Copies and ZIP creation run while the lease is held, which is
+    /// what makes collection work on devices without the kernel stage.
+    @discardableResult
+    static func retainAccess(_ path: String) -> UserlandAccess.RetainedLease? {
+        let key = ContainerDiscoveryMerger.canonicalPath(path)
+        leaseLock.lock()
+        if let existing = retainedLeases[key] { leaseLock.unlock(); return existing }
+        leaseLock.unlock()
+
+        guard let lease = UserlandAccess.RetainedLease.acquire(path: path) else { return nil }
+        leaseLock.lock()
+        retainedLeases[key] = lease
+        leaseLock.unlock()
+        return lease
+    }
+
+    static func releaseAccess(_ path: String) {
+        let key = ContainerDiscoveryMerger.canonicalPath(path)
+        leaseLock.lock()
+        let lease = retainedLeases.removeValue(forKey: key)
+        leaseLock.unlock()
+        lease?.release()
+    }
+
+    /// True when a lease for this path is already held (the container was granted
+    /// during path resolution, so the collection does not need a second grant).
+    static func hasRetainedAccess(_ path: String) -> Bool {
+        let key = ContainerDiscoveryMerger.canonicalPath(path)
+        leaseLock.lock()
+        defer { leaseLock.unlock() }
+        return retainedLeases[key] != nil
+    }
+
+    static func releaseAllAccess() {
+        leaseLock.lock()
+        let leases = retainedLeases
+        retainedLeases.removeAll()
+        leaseLock.unlock()
+        for (_, lease) in leases { lease.release() }
+    }
+
+    /// Whether a filesystem read outside the app container is possible at all
+    /// (kernel sandbox escape, userland extension, or an already-built container
+    /// index — 1051 granted containers are proof enough).
+    static var hasFilesystemAccess: Bool {
+        if KernelBridge.hasSandboxAccess { return true }
+        if UserlandAccess.hasVerifiedAccess { return true }
+        indexLock.lock()
+        let hasIndex = !containerIndex.isEmpty
+        indexLock.unlock()
+        if hasIndex { return true }
+        // A grant rewrites the App Group's Library/Caches; never do that on the
+        // main thread — start the probe in the background and report "not yet".
+        if Thread.isMainThread {
+            DispatchQueue.global(qos: .utility).async { _ = UserlandAccess.probe(force: true) }
+            return false
+        }
+        return UserlandAccess.isAvailable
+    }
+
+    static func containersFromFilesystem() -> [InstalledApp] {
+        var dirs: [String] = []
+        var seen = Set<String>()
+        for root in appDataRoots {
+            let granted = enumerateDirectoriesWithTraversalGrant(path: root)
+            let listed = granted.isEmpty ? enumerateDirectories(path: root) : granted
+            for dir in listed {
+                let canonical = ContainerDiscoveryMerger.canonicalPath(dir)
+                guard seen.insert(canonical).inserted else { continue }
+                dirs.append(dir)
+            }
+            traceLog("browser: filesystem root=\(root) enumerated \(listed.count) containers")
+        }
+        let apps = dirs.compactMap { dir -> InstalledApp? in
+            let uuid = (dir as NSString).lastPathComponent
+            guard UUID(uuidString: uuid) != nil else { return nil }
+            let fallback = ContainerIdentityResolver.fallbackIdentity(containerPath: dir)
+            return InstalledApp(
+                bundleID: fallback.bundleID,
+                name: fallback.displayName,
+                containerPath: dir,
+                version: "",
+                icon: nil
+            )
+        }
+        traceLog("browser: filesystem accepted \(apps.count)/\(dirs.count) app containers")
+        return apps
+    }
+
+    static func inferredApp(
+        for fallback: InstalledApp,
+        knownAppsByBundleID: [String: InstalledApp],
+        launchServicesIdentifiers: Set<String>
+    ) -> InstalledApp? {
+        guard UUID(uuidString: fallback.bundleID) != nil else { return fallback }
+
+        // Fast path: the container index already knows this container's bundle id
+        // (it read the containermanager xattr while building the index), so the
+        // expensive grant + Saved State / Preferences probing can be skipped.
+        if let identifier = indexIdentifier(forContainerPath: fallback.containerPath),
+           ContainerBundleCandidateResolver.isValidBundleIdentifier(identifier) {
+            let info = appInfoForBundleID(identifier) as? [String: Any] ?? [:]
+            return InstalledApp(
+                bundleID: identifier,
+                name: info["name"] as? String ?? identifier,
+                containerPath: fallback.containerPath,
+                version: info["version"] as? String ?? "",
+                icon: info["icon"] as? UIImage
+            )
+        }
+
+        // Read the MCM identifier (containermanager xattr first, metadata plist
+        // second). With the sandbox escape active the raw read succeeds even when
+        // every MCM/bad_query grant is denied; on userland-only devices the
+        // caller already holds a worse_query extension for this container.
+        if let identifier = containerIdentifier(containerPath: fallback.containerPath) {
+            let bundleID = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            if ContainerBundleCandidateResolver.isValidBundleIdentifier(bundleID),
+               !bundleID.hasPrefix("systemgroup.") {
+                let info = appInfoForBundleID(bundleID) as? [String: Any] ?? [:]
+                let resolvedName = info["name"] as? String ?? bundleID
+                return InstalledApp(
+                    bundleID: bundleID,
+                    name: resolvedName,
+                    containerPath: fallback.containerPath,
+                    version: info["version"] as? String ?? "",
+                    icon: info["icon"] as? UIImage
+                )
+            }
+        }
+
+        let handle = grantContainerAccess(fallback.containerPath)
+        defer {
+            if handle >= 0 { bad_query_release(handle) }
+        }
+
+        let libraryPath = (fallback.containerPath as NSString).appendingPathComponent("Library")
+        let savedStatePath = (libraryPath as NSString).appendingPathComponent("Saved Application State")
+        let preferencesPath = (libraryPath as NSString).appendingPathComponent("Preferences")
+        let savedStates = (try? FileManager.default.contentsOfDirectory(atPath: savedStatePath)) ?? []
+        let preferences = (try? FileManager.default.contentsOfDirectory(atPath: preferencesPath)) ?? []
+        let strongCandidates = ContainerBundleCandidateResolver.candidates(
+            savedStateNames: savedStates,
+            preferenceFileNames: []
+        )
+        let candidates = ContainerBundleCandidateResolver.candidates(
+            savedStateNames: savedStates,
+            preferenceFileNames: preferences
+        )
+
+        func resolvedApp(from candidates: [String], source: String) -> InstalledApp? {
+            for bundleID in candidates {
+                if let known = knownAppsByBundleID[bundleID] {
+                    return InstalledApp(
+                        bundleID: bundleID,
+                        name: known.name,
+                        containerPath: fallback.containerPath,
+                        version: known.version,
+                        icon: known.icon
+                    )
+                }
+
+                let info = appInfoForBundleID(bundleID) as? [String: Any] ?? [:]
+                guard info["found"] as? Bool == true else { continue }
+                return InstalledApp(
+                    bundleID: bundleID,
+                    name: info["name"] as? String ?? bundleID,
+                    containerPath: fallback.containerPath,
+                    version: info["version"] as? String ?? "",
+                    icon: info["icon"] as? UIImage
+                )
+            }
+
+            guard let bundleID = ContainerBundleCandidateResolver.confirmedCandidate(
+                candidates: candidates,
+                launchServicesIdentifiers: launchServicesIdentifiers
+            ) else {
+                return nil
+            }
+            let uuid = (fallback.containerPath as NSString).lastPathComponent
+            traceLog("browser: content+LaunchServices confirmed \(uuid) -> \(bundleID) source=\(source)")
+            return InstalledApp(
+                bundleID: bundleID,
+                name: bundleID,
+                containerPath: fallback.containerPath,
+                version: "",
+                icon: nil
+            )
+        }
+
+        if let app = resolvedApp(from: candidates, source: "state/preferences") {
+            return app
+        }
+        if let bundleID = strongCandidates.first {
+            return InstalledApp(
+                bundleID: bundleID,
+                name: bundleID,
+                containerPath: fallback.containerPath,
+                version: "",
+                icon: nil
+            )
+        }
+
+        let artifactPaths = [
+            (libraryPath as NSString).appendingPathComponent("SplashBoard/Snapshots"),
+            (libraryPath as NSString).appendingPathComponent("Caches/Snapshots"),
+            (libraryPath as NSString).appendingPathComponent("Cookies"),
+            (libraryPath as NSString).appendingPathComponent("WebKit")
+        ]
+        let artifactNames = artifactPaths.flatMap {
+            (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? []
+        }
+        let artifactCandidates = ContainerBundleCandidateResolver.candidates(
+            savedStateNames: [],
+            preferenceFileNames: [],
+            artifactNames: artifactNames
+        )
+        if let app = resolvedApp(from: artifactCandidates, source: "artifacts") {
+            return app
+        }
+
+        let uuid = (fallback.containerPath as NSString).lastPathComponent
+        let preview = (candidates + artifactCandidates).prefix(6).joined(separator: ",")
+        traceLog("browser: unresolved \(uuid) metadata=unavailable savedStates=\(savedStates.count) preferences=\(preferences.count) artifacts=\(artifactNames.count) candidates=[\(preview)]")
+        return nil
+    }
+
+    static func inferUnidentifiedApps(
+        in apps: [InstalledApp],
+        knownApps: [InstalledApp],
+        launchServicesIdentifiers: Set<String> = []
+    ) -> [InstalledApp] {
+        let knownByBundleID = Dictionary(knownApps.map { ($0.bundleID, $0) }, uniquingKeysWith: { first, _ in first })
+        var inferredCount = 0
+        let result = apps.enumerated().map { index, app -> InstalledApp in
+            guard UUID(uuidString: app.bundleID) != nil,
+                  let inferred = autoreleasepool(invoking: {
+                      inferredApp(
+                        for: app,
+                        knownAppsByBundleID: knownByBundleID,
+                        launchServicesIdentifiers: launchServicesIdentifiers
+                      )
+                  }) else {
+                return app
+            }
+            inferredCount += 1
+            if inferredCount <= 5 {
+                traceLog("browser: inferred \((app.containerPath as NSString).lastPathComponent) -> \(inferred.bundleID)")
+            }
+            return inferred
+        }
+        let unresolvedCount = result.filter { UUID(uuidString: $0.bundleID) != nil }.count
+        traceLog("browser: inferred identities for \(inferredCount)/\(apps.count) merged containers; unresolved=\(unresolvedCount)")
+        return result
+    }
+
+    // MARK: File browsing
+
+    static func listFiles(at path: String) -> [FileEntry] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: path) else {
+            traceLog("listFiles: FAILED for \(path) errno=\(errno)")
+            return []
+        }
+        var entries: [FileEntry] = []
+        for item in items {
+            if item.hasPrefix(".") { continue }
+            let full = (path as NSString).appendingPathComponent(item)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: full, isDirectory: &isDir) else { continue }
+            let attributes = try? fm.attributesOfItem(atPath: full)
+            let size = isDir.boolValue
+                ? -1
+                : (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            entries.append(
+                FileEntry(
+                    name: item,
+                    path: full,
+                    isDirectory: isDir.boolValue,
+                    size: size,
+                    modifiedAt: attributes?[.modificationDate] as? Date
+                )
+            )
+        }
+        return entries.sorted {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    static func readTextFile(at path: String, limit: Int = 200_000) -> String {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return "Unable to read file."
+        }
+        let truncated = data.prefix(limit)
+        if let text = String(data: truncated, encoding: .utf8) {
+            return data.count > limit ? text + "\n… [truncated]" : text
+        }
+        if let text = String(data: truncated, encoding: .utf16) {
+            return data.count > limit ? text + "\n… [truncated]" : text
+        }
+        return "Binary data (\(data.count) bytes) — not text."
+    }
+}
