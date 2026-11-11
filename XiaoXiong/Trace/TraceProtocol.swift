@@ -5,6 +5,8 @@ import Foundation
 
 func traceLog(_ message: String) {
     NSLog("[trace3105] %@", message)
+    // 同时落到沙盒 Documents/log2 —— 没有 Xcode / idevicesyslog 时唯一的排查途径
+    DebugLogWriter.shared.write(message)
 }
 
 // MARK: - Device info
