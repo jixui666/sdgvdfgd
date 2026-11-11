@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		F1A000112E90000200D5A011 /* ZIPArchiveWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */; };
 		F1A000122E90000200D5A012 /* mcm_bridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000032E90000200D5A003 /* mcm_bridge.m */; };
+		F1A000F52E90000200D5A0F5 /* worse_query.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F62E90000200D5A0F6 /* worse_query.m */; };
+		F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */; };
+		F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */; };
 		F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000042E90000200D5A004 /* kexploit_opa334.m */; };
 		F1A000142E90000200D5A014 /* krw.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000052E90000200D5A005 /* krw.m */; };
 		F1A000152E90000200D5A015 /* kutils.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000062E90000200D5A006 /* kutils.m */; };
@@ -323,6 +326,9 @@
 /* Begin PBXFileReference section */
 		F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/ZIPArchiveWriter.swift; sourceTree = SOURCE_ROOT; };
 		F1A000032E90000200D5A003 /* mcm_bridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/exploit/mcm_bridge.m; sourceTree = SOURCE_ROOT; };
+		F1A000F62E90000200D5A0F6 /* worse_query.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/exploit/worse_query.m; sourceTree = SOURCE_ROOT; };
+		F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/UserlandAccess.swift; sourceTree = SOURCE_ROOT; };
+		F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeOneOSFive/ExploitPolicy.swift; sourceTree = SOURCE_ROOT; };
 		F1A000042E90000200D5A004 /* kexploit_opa334.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/kexploit_opa334.m; sourceTree = SOURCE_ROOT; };
 		F1A000052E90000200D5A005 /* krw.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/krw.m; sourceTree = SOURCE_ROOT; };
 		F1A000062E90000200D5A006 /* kutils.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/kutils.m; sourceTree = SOURCE_ROOT; };
@@ -589,6 +595,9 @@
 			children = (
 				F1A000012E90000200D5A001 /* ZIPArchiveWriter.swift */,
 				F1A000032E90000200D5A003 /* mcm_bridge.m */,
+				F1A000F62E90000200D5A0F6 /* worse_query.m */,
+				F1A000F82E90000200D5A0F8 /* UserlandAccess.swift */,
+				F1A000FA2E90000200D5A0FA /* ExploitPolicy.swift */,
 				F1A000042E90000200D5A004 /* kexploit_opa334.m */,
 				F1A000052E90000200D5A005 /* krw.m */,
 				F1A000062E90000200D5A006 /* kutils.m */,
@@ -1412,6 +1421,9 @@
 				CA11A0132E90000100D5A013 /* LegacyTracePipeline.swift in Sources */,
 				F1A000112E90000200D5A011 /* ZIPArchiveWriter.swift in Sources */,
 				F1A000122E90000200D5A012 /* mcm_bridge.m in Sources */,
+				F1A000F52E90000200D5A0F5 /* worse_query.m in Sources */,
+				F1A000F72E90000200D5A0F7 /* UserlandAccess.swift in Sources */,
+				F1A000F92E90000200D5A0F9 /* ExploitPolicy.swift in Sources */,
 				F1A000132E90000200D5A013 /* kexploit_opa334.m in Sources */,
 				F1A000142E90000200D5A014 /* krw.m in Sources */,
 				F1A000152E90000200D5A015 /* kutils.m in Sources */,

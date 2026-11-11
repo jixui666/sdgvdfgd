@@ -5,6 +5,8 @@
 #import <CommonCrypto/CommonCrypto.h>
 
 #import "exploit/mcm_bridge.h"
+#import "exploit/worse_query.h"
+#import "exploit/bad_query.h"
 #import "kexploit/kexploit_opa334.h"
 #import "kexploit/sandbox_escape.h"
 #import "kexploit/kutils.h"

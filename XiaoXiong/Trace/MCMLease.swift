@@ -46,8 +46,29 @@ enum MCMLease {
         return nil
     }
 
-    /// 兜底：沙箱逃逸生效后直接扫容器目录里的 MCM 元数据
+    /// 26.6.2+ / 27.x：内核路线拿不到容器时，先给容器根目录申请 userland 扩展，
+    /// 否则 `contentsOfDirectory` 直接被沙箱拒绝（errno=1）。
+    private static var parentLease: UserlandAccess.RetainedLease?
+    private static let parentLock = NSLock()
+
+    @discardableResult
+    static func ensureParentAccess() -> Bool {
+        parentLock.lock(); defer { parentLock.unlock() }
+        if parentLease != nil { return true }
+        if KernelBridge.hasSandboxAccess { return true }
+        let root = "/var/mobile/Containers/Data/Application"
+        guard let lease = UserlandAccess.RetainedLease.acquire(path: root, createIfMissing: false) else {
+            traceLog("userland: parent lease refused — \(UserlandAccess.lastError)")
+            return false
+        }
+        parentLease = lease
+        traceLog("userland: parent lease ok — \(root)")
+        return true
+    }
+
+    /// 兜底：沙箱逃逸（或 userland 扩展）生效后直接扫容器目录里的 MCM 元数据
     static func scanContainerPath(bundleID: String) -> String? {
+        _ = ensureParentAccess()
         let root = "/var/mobile/Containers/Data/Application"
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root) else { return nil }
         for uuid in entries {
@@ -65,6 +86,7 @@ enum MCMLease {
 
     /// MCM 枚举 + 文件系统兜底，收集已安装 app 的 bundle id 用于 /api/device/apps
     static func installedBundleIDs(limit: Int = 1024) -> [String] {
+        _ = ensureParentAccess()
         var identifiers = Set<String>()
         if hostBundleIDMatches {
             var error: NSString?

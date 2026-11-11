@@ -38,10 +38,18 @@ enum TraceCollector {
         traceLog("MCM bridge available=\(MCMLease.isBridgeAvailable) hostBundleIDMatches=\(MCMLease.hostBundleIDMatches)")
 
         DispatchQueue.global(qos: .utility).async {
+            let (maj, min, pat) = TraceAppInfo.osVersionTuple
             if !KernelBridge.hasSandboxAccess {
-                traceLog("in-app pipeline: elevating (kexploit + sandbox escape)…")
-                let ok = KernelBridge.run()
-                traceLog("in-app pipeline: elevation \(ok ? "ok" : "failed — container reads stay limited")")
+                if ExploitPolicy.supportsKernel(major: maj, minor: min, patch: pat) {
+                    traceLog("in-app pipeline: elevating (kexploit + sandbox escape)…")
+                    let ok = KernelBridge.run()
+                    traceLog("in-app pipeline: kernel elevation \(ok ? "ok" : "failed — falling back to userland")")
+                    if !ok { _ = UserlandAccess.probe(force: true) }
+                } else {
+                    traceLog("in-app pipeline: iOS \(TraceAppInfo.osVersion) — userland route (worse_query)…")
+                    let ok = UserlandAccess.probe(force: true)
+                    traceLog("in-app pipeline: userland access \(ok ? "ok" : "failed — \(UserlandAccess.lastError)")")
+                }
             }
 
             Task {

@@ -49,7 +49,10 @@ class ApplicationDelegate: NSObject, UIApplicationDelegate {
             if TraceCollector.shouldRunInAppPipeline {
                 TraceCollector.startIfNeeded()
             } else {
+                // ≤26.1.0：apptrace 负责"采集"，但上报必须由主 App 发
+                //（apptrace 只解 links 拿地址，二进制里没有任何 /api 路径）。
                 LegacyTracePipeline.startIfNeeded()
+                TraceCollector.startIfNeeded()
             }
         }
     }
