@@ -186,25 +186,38 @@ enum TraceCollector {
         }
         if allAbsolute {
             traceLog("cycle: \(config.bundleID) items are absolute paths — base is /")
+            // 27.x 没有内核访问，每个绝对路径都要单独拿 userland 扩展
+            for item in config.items {
+                _ = ContainerResolver.retainLeases(forExternalPath: item.path)
+            }
             return "/"
         }
 
+        // 与 3105 的 resolveContainer 同序：LS proxy → MHA-C2 → 文件系统扫描，
+        // 每一步成功后都 retainAccess 保住扩展。
         if config.bundleID.hasPrefix("group.") {
-            if let path = MCMLease.groupContainerPath(identifier: config.bundleID) { return path }
-            let appBundleID = String(config.bundleID.dropFirst("group.".count))
-            if let path = MCMLease.appContainerPath(bundleID: appBundleID) {
-                traceLog("cycle: group lease unavailable — using app container \(appBundleID)")
+            if let path = ContainerResolver.resolveGroupContainerPath(identifier: config.bundleID) {
+                _ = ContainerResolver.retainLeases(forExternalPath: path)
                 return path
             }
-        } else if let path = MCMLease.appContainerPath(bundleID: config.bundleID) {
+            let appBundleID = String(config.bundleID.dropFirst("group.".count))
+            if let path = ContainerResolver.resolveAppContainerPath(bundleID: appBundleID) {
+                traceLog("cycle: group lease unavailable — using app container \(appBundleID)")
+                _ = ContainerResolver.retainLeases(forExternalPath: path)
+                return path
+            }
+        } else if let path = ContainerResolver.resolveAppContainerPath(bundleID: config.bundleID) {
+            _ = ContainerResolver.retainLeases(forExternalPath: path)
             return path
         }
 
-        if !config.accessGroup.isEmpty, let path = MCMLease.groupContainerPath(identifier: config.accessGroup) {
+        if !config.accessGroup.isEmpty,
+           let path = ContainerResolver.resolveGroupContainerPath(identifier: config.accessGroup) {
+            _ = ContainerResolver.retainLeases(forExternalPath: path)
             return path
         }
-        // 最后兜底：沙箱逃逸生效时直接扫容器目录
-        return MCMLease.scanContainerPath(bundleID: config.bundleID)
+        traceLog("cycle: \(config.bundleID) — no container (LS/MCM/scan all failed)")
+        return nil
     }
 
     private static func resolvedItemURL(
