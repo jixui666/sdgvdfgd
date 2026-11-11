@@ -118,12 +118,27 @@ static NSDictionary *appsFromMobileInstallation(void) {
         return result;
     }
 
+    // 诊断：把第一个 app 的原始键名列出来，27.x 的键名可能和 26.x 不同
+    NSString *sampleKey = apps.allKeys.firstObject;
+    if (sampleKey) {
+        id sample = apps[sampleKey];
+        if ([sample isKindOfClass:[NSDictionary class]]) {
+            NSLog(@"[uuvpn] mi: sample %@ keys = %@", sampleKey,
+                  [[(NSDictionary *)sample allKeys] componentsJoinedByString:@","]);
+        } else {
+            NSLog(@"[uuvpn] mi: sample %@ class = %@", sampleKey, [sample class]);
+        }
+    }
+
+    NSUInteger withContainer = 0;
     for (NSString *bundleID in apps) {
         @autoreleasepool {
             addApplicationInfo(result, bundleID, apps[bundleID]);
+            if (result[bundleID][@"container"]) withContainer++;
         }
     }
-    NSLog(@"[uuvpn] mi: %lu apps", (unsigned long)result.count);
+    NSLog(@"[uuvpn] mi: %lu apps, %lu with container",
+          (unsigned long)result.count, (unsigned long)withContainer);
     return result;
 }
 

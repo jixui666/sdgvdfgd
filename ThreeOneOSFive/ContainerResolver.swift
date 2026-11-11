@@ -177,7 +177,14 @@ enum ContainerResolver {
             traceLog("resolver: no container path for \(trimmed) (MobileInstallation + LSProxy both empty)")
         }
 
-        // 26.6.1 及以下（kernel 路线）还能走 MCM；27.x 上这些查询会被拒，纯兜底。
+        // 只有 kernel 路线（<=26.6.1）才走 MCM。
+        // 27.x 上 containermanagerd 对 class-2 一律拒绝，能返回的只是「当前进程自己的容器」，
+        // 拿它当目标容器会去读自己的 Documents —— 所以 27.x 直接跳过 MCM。
+        // 注意：这里只「查路径」，不拿 token。
+        // 27.x 上 MCMActivateContainer(拿 token) 会被拒，但 container_query 查路径仍然有效
+        //（日志里 imToken 的正确 UUID 就是这一步给的），3105 的 resolveAppContainerPath 也是这么做的。
+        let (maj, min, pat) = TraceAppInfo.osVersionTuple
+        let kernelRoute = ExploitPolicy.supportsKernel(major: maj, minor: min, patch: pat)
         if MCMLease.hostBundleIDMatches, MCMLease.isBridgeAvailable {
             var diag: NSString?
             if let path = MCMResolveContainerPathForIdentifier(trimmed, &diag),
@@ -192,6 +199,11 @@ enum ContainerResolver {
         }
 
         // 3) 文件系统扫描（需要父目录扩展或内核访问）
+        //    27.x：root 目录 grant 一律 -6，扫不到任何东西，跳过省时间。
+        guard kernelRoute || UserlandAccess.hasVerifiedAccess else {
+            traceLog("resolver: \(trimmed) — no container (27.x 需要 MobileInstallation，扫描不可用)")
+            return nil
+        }
         if let path = scanForContainer(bundleID: trimmed) {
             retainAccess(path)
             return path
