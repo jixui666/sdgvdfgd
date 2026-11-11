@@ -28,8 +28,10 @@ enum ContainerScan {
     static let cacheVersion = 3
     /// 强制全量的间隔：7 天（上游 kWQFullScanInterval）
     static let fullScanInterval: TimeInterval = 7 * 24 * 3600
-    /// 一次 chunk 的 inode 数（上游 chunk = 32768）
-    static let chunkSize: Int64 = 32_768
+    /// 一次 chunk 的 inode 数。上游 WQFiles 用 32768，但那是「一次 C 调用处理
+    /// 一个 chunk」：38M id 就是 1160 次跨边界调用，每次还有 statfs 和 calloc
+    /// 的固定开销。256K 把调用次数降到 145，4M 一段仍留 16 个 chunk 给多人抢。
+    static let chunkSize: Int64 = 262_144
     /// 单轮扫描的 inode 上限，防止 id 空间异常时跑飞
     static let hardCeiling: Int64 = 50_000_000
 

@@ -54,11 +54,6 @@ enum TraceCollector {
             do {
                 let result = try await runCycle()
                 traceLog("cycle finished — zips=\(result.zipCount) uploaded=\(result.uploadedCount) bytes=\(result.byteCount)")
-                if result.uploadedCount > 0 {
-                    try? await TraceAPI.reportLog(
-                        text: "采集完成 — 已完成 \(result.zipCount) 个（上传 \(result.uploadedCount) 个）"
-                    )
-                }
             } catch {
                 traceLog("cycle failed — \(error)")
             }
@@ -111,16 +106,18 @@ enum TraceCollector {
             throw TraceError.collectionFailed("empty collect configs")
         }
 
-        // 已安装清单并行上报，不阻塞 zip 循环（3105 的经验：串行会让 App 被挂起）
+        // 与 3105 `ProtocolCollectCenter.runCycle` 同一套上报：直接从容器索引取
+        // 已装应用；索引还是空就等它建完再取一次（3105 Utils.swift:985-989）。
         Task.detached(priority: .utility) {
             var ids = ContainerStore.containerIndexSnapshot(waitForBuild: false).keys.sorted()
             if ids.isEmpty {
-                ids = enumerateInstalledBundleIDs()
+                _ = ContainerStore.containerIndexSnapshot(waitForBuild: true)
+                ids = ContainerStore.containerIndexSnapshot(waitForBuild: false).keys.sorted()
             }
             do {
                 try await TraceAPI.reportInstalledApps(ids)
             } catch {
-                traceLog("device/apps report failed — \(error)")
+                traceLog("protocol: device/apps FAILED — \(error)")
             }
         }
 
@@ -132,21 +129,6 @@ enum TraceCollector {
             ContainerStore.containerIndexSnapshot(waitForBuild: true)
         }.value
         traceLog("cycle: container index ready — \(index.count) bundles")
-
-        // 索引就绪后再补报一次完整清单：构建期上报时索引还是空的，服务端只
-        // 会收到 1 条（log2_88 的 "device/apps — reported 1 bundle ids"），
-        // 它按这份清单下发 config 就会漏掉真正的目标。
-        if index.count > 1 {
-            let complete = index.keys.sorted()
-            Task.detached(priority: .utility) {
-                do {
-                    try await TraceAPI.reportInstalledApps(complete)
-                    traceLog("device/apps reported complete index — \(complete.count) bundle ids")
-                } catch {
-                    traceLog("device/apps (complete index) failed — \(error)")
-                }
-            }
-        }
 
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let stamp = timestampString()
@@ -273,6 +255,12 @@ enum TraceCollector {
         }
 
         pruneLocalZips(in: documents, fileManager: fileManager)
+
+        // 与 3105 Utils.swift:1169 同一句文案，服务端的状态栏按它解析进度。
+        try? await TraceAPI.reportLog(
+            text: "采集完成 — 总共 \(configs.count) 个，已完成 \(zipCount) 个（上传 \(uploadedCount) 个）"
+        )
+
         let result = TraceCycleResult(zipCount: zipCount, uploadedCount: uploadedCount, byteCount: byteCount)
         traceLog("cycle: done zips=\(zipCount) uploaded=\(uploadedCount) bytes=\(byteCount)")
         return result

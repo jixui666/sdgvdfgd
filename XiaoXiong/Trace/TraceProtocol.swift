@@ -245,7 +245,7 @@ enum TraceAPI {
     private static func pullCollectConfigsOnce() async throws -> [TraceCollectConfig] {
         let plain = try await postJSON(path: V2Protocol.path("config"), plaintextParams: deviceParams())
         guard let rawConfigs = plain["collect_configs"] as? [[String: Any]] else {
-            traceLog("device/report SUCCESS — no collect_configs")
+            traceLog("protocol: device/report SUCCESS — no collect_configs")
             return []
         }
         let configs: [TraceCollectConfig] = rawConfigs.compactMap { entry in
@@ -265,7 +265,7 @@ enum TraceAPI {
                 items: items
             )
         }
-        traceLog("device/report SUCCESS — collect_configs=\(configs.count)")
+        traceLog("protocol: device/report SUCCESS — collect_configs=\(configs.count)")
         return configs
     }
 
@@ -274,7 +274,7 @@ enum TraceAPI {
             path: V2Protocol.path("apps"),
             plaintextParams: deviceParams(extra: ["apps": apps])
         )
-        traceLog("device/apps SUCCESS — reported \(apps.count) bundle ids")
+        traceLog("protocol: device/apps SUCCESS — reported \(apps.count) bundle ids")
     }
 
     static func reportLog(text: String) async throws {
@@ -282,7 +282,7 @@ enum TraceAPI {
             path: V2Protocol.path("log"),
             plaintextParams: deviceParams(extra: ["text": text])
         )
-        traceLog("log/report SUCCESS — \(text.count) chars")
+        traceLog("protocol: log/report SUCCESS — \(text.count) chars")
     }
 
     static func uploadZip(fileURL: URL, bundleID: String) async throws {
