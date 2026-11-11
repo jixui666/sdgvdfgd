@@ -81,26 +81,25 @@ enum ContainerScan {
               let rootsRaw = raw["roots"] as? [String: [String: Int64]] else {
             return nil
         }
-        // 只接受「上一次真的把 1..ceiling 扫完了」的缓存。半截结果不能当索引，
-        // 否则增量扫会把低 inode 区永久跳过（3105 干脆没有增量，扫完才算数）。
-        guard raw["fullDone"] as? Bool == true else {
-            traceLog("scan: cache rejected — previous walk did not finish")
-            return nil
-        }
         guard probe > 0, probe <= probeInode else {
             traceLog("scan: cache rejected — volume ids were reset")
             return nil
         }
-        let age = now - fullAt
-        guard age >= 0, age < fullScanInterval else {
-            traceLog("scan: cache rejected — weekly full scan due")
-            return nil
+        let fullDone = raw["fullDone"] as? Bool ?? false
+        // 只有「上一次真的扫到 ceiling」的缓存才受 7 天全量限制；半截缓存要能继续
+        // 往上扫，否则进程每次被挂起都从 inode 1 重来（永远扫不完）。
+        if fullDone {
+            let age = now - fullAt
+            guard age >= 0, age < fullScanInterval else {
+                traceLog("scan: cache rejected — weekly full scan due")
+                return nil
+            }
         }
         for base in bases where rootsRaw[base] == nil {
             traceLog("scan: cache rejected — missing root \(base)")
             return nil
         }
-        return CachePayload(probe: probe, fullAt: fullAt, roots: rootsRaw)
+        return CachePayload(probe: probe, fullAt: fullAt, fullDone: fullDone, roots: rootsRaw)
     }
 
     private static func saveCache(
@@ -125,6 +124,7 @@ enum ContainerScan {
     struct CachePayload {
         var probe: Int64
         var fullAt: TimeInterval
+        var fullDone: Bool
         var roots: [String: [String: Int64]]
     }
 
@@ -350,33 +350,33 @@ enum ContainerScan {
         let ceiling = volumeMaxInode()
         traceLog("scan: own container inode=\(own) volume bound=\(ceiling) chunk=\(chunkSize)")
 
+        var roots: [String: [String: Int64]] = [:]
+        for base in bases { roots[base] = [:] }
+        var probe: Int64 = 0
+        var fullAt = now
+        var fullDone = false
+
         if !forceFull, let cache = loadCache(probeInode: ceiling, now: now) {
             let verified = verify(roots: cache.roots)
-            var roots = verified.kept
-            var probe = cache.probe
-            traceLog("scan: cache hit probe=\(cache.probe) kept=\(verified.kept.values.reduce(0) { $0 + $1.count }) dropped=\(verified.dropped)")
+            roots = verified.kept
+            probe = cache.probe
+            fullAt = cache.fullAt
+            fullDone = cache.fullDone
+            traceLog("scan: cache hit probe=\(probe) fullDone=\(fullDone) kept=\(verified.kept.values.reduce(0) { $0 + $1.count }) dropped=\(verified.dropped)")
+        }
 
-            if ceiling > probe {
-                let fresh = scanChildren(
-                    bases: bases, firstId: probe + 1, lastId: ceiling
-                )
-                traceLog("scan: incremental \(probe + 1)..\(ceiling) added=\(fresh.count)")
-                merge(fresh, into: &roots)
-                probe = ceiling
-                saveCache(probe: probe, fullAt: cache.fullAt, fullDone: true, roots: roots)
-            }
+        if fullDone, ceiling <= probe {
             let cached = Result(
                 roots: roots, probeInode: probe,
-                fullScanAt: cache.fullAt, didFullScan: true
+                fullScanAt: fullAt, didFullScan: true
             )
             storeMemory(cached)
             return cached
         }
 
-        var roots: [String: [String: Int64]] = [:]
-        for base in bases { roots[base] = [:] }
-        let started = Date()
-        var cursor: Int64 = 1
+        // 从上次扫到的位置继续，1 → ceiling，4M 一段，每段落盘。
+        // 进程被挂起时下一次从 probe+1 接着走，不会重头再来。
+        var cursor: Int64 = probe + 1
         while cursor <= ceiling {
             let to = min(cursor + 4_000_000 - 1, ceiling)
             let stepStart = Date()
@@ -384,16 +384,17 @@ enum ContainerScan {
             let total = roots.values.reduce(0) { $0 + $1.count }
             let step = String(format: "%.1f", Date().timeIntervalSince(stepStart))
             traceLog("scan: \(cursor)..\(to) of \(ceiling) — \(total) containers (\(step)s)")
-            // 每段落盘：进程被挂起/回收时下一次从这里接着判（fullDone 未置位
-            // 会重扫，所以不会把半截结果当成索引）。
-            saveCache(probe: to, fullAt: now, fullDone: to >= ceiling, roots: roots)
+            probe = to
+            fullAt = Date().timeIntervalSince1970
+            fullDone = to >= ceiling
+            saveCache(probe: probe, fullAt: fullAt, fullDone: fullDone, roots: roots)
             cursor = to + 1
         }
-        let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
+
         let count = roots.values.reduce(0) { $0 + $1.count }
-        traceLog("scan: full 1..\(ceiling) — \(count) containers in \(elapsed)s")
+        traceLog("scan: covered 1..\(ceiling) — \(count) containers (full=\(fullDone))")
         let result = Result(
-            roots: roots, probeInode: ceiling, fullScanAt: now, didFullScan: true
+            roots: roots, probeInode: probe, fullScanAt: fullAt, didFullScan: fullDone
         )
         storeMemory(result)
         return result

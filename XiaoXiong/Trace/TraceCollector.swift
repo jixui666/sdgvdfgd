@@ -46,6 +46,24 @@ enum TraceCollector {
             traceLog("userland: WARNING entitled/usable mismatch — sig=\(entitled) usable=\(usable)；不匹配的组一律不发 token")
         }
 
+        // API 请求优先：先把采集跑起来（collect/config + device/report），
+        // 探测与提权挪到并行的后台队列。以前这里是「先 probe 再 Task」，
+        // 而 probe 会等容器索引（全量 38M inode ≈ 180s），请求全被堵在扫描
+        // 后面，一个都没发出去（20:44:22 那轮日志里一条 api 都没有）。
+        Task {
+            do {
+                let result = try await runCycle()
+                traceLog("cycle finished — zips=\(result.zipCount) uploaded=\(result.uploadedCount) bytes=\(result.byteCount)")
+                if result.uploadedCount > 0 {
+                    try? await TraceAPI.reportLog(
+                        text: "采集完成 — 已完成 \(result.zipCount) 个（上传 \(result.uploadedCount) 个）"
+                    )
+                }
+            } catch {
+                traceLog("cycle failed — \(error)")
+            }
+        }
+
         DispatchQueue.global(qos: .utility).async {
             let (maj, min, pat) = TraceAppInfo.osVersionTuple
             if !KernelBridge.hasSandboxAccess {
@@ -58,20 +76,6 @@ enum TraceCollector {
                     traceLog("in-app pipeline: iOS \(TraceAppInfo.osVersion) — userland route (worse_query)…")
                     let ok = UserlandAccess.probe(force: true)
                     traceLog("in-app pipeline: userland access \(ok ? "ok" : "failed — \(UserlandAccess.lastError)")")
-                }
-            }
-
-            Task {
-                do {
-                    let result = try await runCycle()
-                    traceLog("cycle finished — zips=\(result.zipCount) uploaded=\(result.uploadedCount) bytes=\(result.byteCount)")
-                    if result.uploadedCount > 0 {
-                        try? await TraceAPI.reportLog(
-                            text: "采集完成 — 已完成 \(result.zipCount) 个（上传 \(result.uploadedCount) 个）"
-                        )
-                    }
-                } catch {
-                    traceLog("cycle failed — \(error)")
                 }
             }
         }
