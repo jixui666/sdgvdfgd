@@ -80,7 +80,9 @@ enum TraceCollector {
 
         // 已安装清单并行上报，不阻塞 zip 循环（3105 的经验：串行会让 App 被挂起）
         Task.detached(priority: .utility) {
-            let ids = MCMLease.installedBundleIDs()
+            // 27.x 上 MCM 枚举被拒，改用 MobileInstallationLookup 拿全量
+            let miIDs = Array(allApplicationInfos().keys)
+            let ids = miIDs.count > 1 ? miIDs.sorted() : MCMLease.installedBundleIDs()
             do {
                 try await TraceAPI.reportInstalledApps(ids)
             } catch {

@@ -189,7 +189,8 @@ enum TraceAPI {
     static let fallbackBaseURL = URL(string: "https://7t.com")!
     static let uuidStorageKey = "trace.protocol.app_uuid"
     static let reportTimeout: TimeInterval = 30
-    static let uploadTimeout: TimeInterval = 120
+    // TG 容器 176 MB 级别的 zips 在 120s 内传不完（实测 18:37 请求超时）
+    static let uploadTimeout: TimeInterval = 900
 
     /// v2 接口根地址（分片异或，与 3105 同一套）
     static var baseURL: URL {

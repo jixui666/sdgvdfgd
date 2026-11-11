@@ -124,6 +124,30 @@ enum ContainerResolver {
         return false
     }
 
+    /// 校验容器是否真属于这个 bundle —— 读 .com.apple.mobile_container_manager.metadata.plist
+    /// 的 MCMMetadataIdentifier 比对。
+    /// 27.x 上 MCM sweep 的部分 class/flags 组合会返回「当前进程自己的容器」，
+    /// 不校验就会去读自己的 Documents，表现为 "skip missing ..."。
+    static func containerMatches(_ path: String, bundleID: String) -> Bool {
+        let metadata = (path as NSString)
+            .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: metadata)),
+              let plist = try? PropertyListSerialization.propertyList(
+                from: data, format: nil
+              ) as? [String: Any],
+              let identifier = plist["MCMMetadataIdentifier"] as? String else {
+            return false
+        }
+        if identifier == bundleID { return true }
+        // group.* 请求时，容器里的标识可能是去掉前缀的 app bundle id
+        if bundleID.hasPrefix("group.") {
+            let bare = String(bundleID.dropFirst("group.".count))
+            if identifier == bare { return true }
+            if identifier.hasSuffix(bare) { return true }
+        }
+        return false
+    }
+
     // MARK: - App 容器解析（3105 的三级顺序）
 
     static let appContainerRoots = [
@@ -143,7 +167,7 @@ enum ContainerResolver {
         //   2. LSApplicationProxy.dataContainerURL —— 27.x 常只回父目录，需校验
         if let raw = containerPathForBundleID(trimmed), !raw.isEmpty {
             let canonical = canonicalPath(raw)
-            if isContainerPath(canonical) {
+            if isContainerPath(canonical), containerMatches(canonical, bundleID: trimmed) {
                 traceLog("resolver: container resolved \(trimmed) -> \(canonical) (route=\(accessRoute))")
                 retainAccess(canonical)
                 return canonical
@@ -157,7 +181,8 @@ enum ContainerResolver {
         if MCMLease.hostBundleIDMatches, MCMLease.isBridgeAvailable {
             var diag: NSString?
             if let path = MCMResolveContainerPathForIdentifier(trimmed, &diag),
-               !path.isEmpty, isContainerPath(path) {
+               !path.isEmpty, isContainerPath(path),
+               containerMatches(path, bundleID: trimmed) {
                 traceLog("resolver: MCM sweep resolved \(trimmed) -> \(path)")
                 retainAccess(path)
                 return path
