@@ -79,6 +79,26 @@ enum TraceCollector {
 
     // MARK: - One cycle
 
+    struct CollectOutcome {
+        var label: String
+        var zipped = false
+        var uploaded = false
+        var bytes: Int64 = 0
+        var skippedReason: String?
+    }
+
+    struct ContainerResolution {
+        var path: String
+        var leases: [UserlandAccess.RetainedLease]
+    }
+
+    /// 与 3105 `ProtocolCollectCenter.runCycle` 同构：
+    ///   1 等容器索引就绪（不等就必然全 skip）
+    ///   2 索引里已知的 app 容器直接采
+    ///   3 group / accessGroup / 绝对路径走 resolver
+    ///   4 边扫边采：walk 每发现一个容器就立刻采集（AsyncStream）
+    ///   5 扫完再给未命中的 config 一次机会，300s 窗口内结束
+    /// 旧的单轮 for 循环在索引还空时就把 13 个 config 全判死了（log2_86 的 1/13）。
     static func runCycle(fileManager: FileManager = .default) async throws -> TraceCycleResult {
         let configs = try await TraceAPI.pullCollectConfigs()
         traceLog("cycle: got \(configs.count) config(s)")
@@ -87,17 +107,12 @@ enum TraceCollector {
             throw TraceError.collectionFailed("empty collect configs")
         }
 
-        // 先把容器索引建起来（首次约 12s，之后 5 分钟 TTL 内命中）。不预热的话
-        // 13 个 config 会在索引还空的时候逐个解析，一个都命中不了 —— log2_86
-        // 的 1/13 就是在这个空窗里判死的。这一行也顺手把「本机到底有几个 app」
-        // 写进日志，方便区分「工具没工作」和「目标没安装」。
-        let warmed = ContainerStore.containerIndexSnapshot()
-        traceLog("cycle: container index warmed — \(warmed.count) entries")
-
         // 已安装清单并行上报，不阻塞 zip 循环（3105 的经验：串行会让 App 被挂起）
         Task.detached(priority: .utility) {
-            // 与 3105 完全一致的多源合并枚举
-            let ids = enumerateInstalledBundleIDs()
+            var ids = ContainerStore.containerIndexSnapshot(waitForBuild: false).keys.sorted()
+            if ids.isEmpty {
+                ids = enumerateInstalledBundleIDs()
+            }
             do {
                 try await TraceAPI.reportInstalledApps(ids)
             } catch {
@@ -105,85 +120,137 @@ enum TraceCollector {
             }
         }
 
+        // 后台继续扫（4M 窗口），然后等索引就绪。这一步是「和 3105 一样能成功」
+        // 的关键：先建索引，再遍历 config；否则 13 个 config 会在空索引窗口里
+        // 逐个解析失败，然后一个个 continue 掉。
+        ContainerStore.startBackgroundContainerScan()
+        let index = await Task.detached(priority: .userInitiated) {
+            ContainerStore.containerIndexSnapshot(waitForBuild: true)
+        }.value
+        traceLog("cycle: container index ready — \(index.count) bundles")
+
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let stamp = timestampString()
+        let byID = Dictionary(configs.map { ($0.bundleID, $0) }, uniquingKeysWith: { first, _ in first })
+        let stateLock = NSLock()
+        var pending = Set(byID.keys)
         var zipCount = 0
         var uploadedCount = 0
         var byteCount: Int64 = 0
 
-        for (index, config) in configs.enumerated() {
-            traceLog("cycle: \(index + 1)/\(configs.count) bundle=\(config.bundleID) items=\(config.items.count)")
+        let discovery = AsyncStream<(String, String)>.makeStream()
+        let stream = discovery.stream
+        let continuation = discovery.continuation
+        ContainerStore.setDiscoveryHandler { identifier, path in
+            continuation.yield((identifier, path))
+        }
+        ContainerStore.setScanCompletionHandler {
+            continuation.finish()
+        }
+        defer {
+            ContainerStore.setDiscoveryHandler(nil)
+            ContainerStore.setScanCompletionHandler(nil)
+        }
 
-            guard let containerPath = resolveContainer(for: config) else {
-                traceLog("cycle: skip \(config.bundleID) — container unavailable")
-                continue
-            }
-            let containerURL = URL(fileURLWithPath: containerPath, isDirectory: true)
-            let sources: [(url: URL, name: String)] = config.items.compactMap { item in
-                guard let url = resolvedItemURL(item, containerURL: containerURL, config: config, fileManager: fileManager) else {
-                    return nil
-                }
-                return (url, url.lastPathComponent)
-            }
-            guard !sources.isEmpty else {
-                traceLog("cycle: skip \(config.bundleID) — no collectable items")
-                continue
-            }
+        func takePending(_ identifier: String) -> TraceCollectConfig? {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard pending.contains(identifier), let config = byID[identifier] else { return nil }
+            pending.remove(identifier)
+            return config
+        }
 
-            let folderName = appFolderName(for: config)
-            let stagingParent = documents.appendingPathComponent(".collect-\(stamp)-\(UUID().uuidString)", isDirectory: true)
-            let staging = stagingParent.appendingPathComponent(folderName, isDirectory: true)
-            do {
-                try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
-            } catch {
-                traceLog("cycle: cannot create staging folder — \(error)")
-                continue
+        func needsResolver(_ config: TraceCollectConfig) -> Bool {
+            if config.bundleID.hasPrefix("group.") { return true }
+            if !config.accessGroup.isEmpty { return true }
+            return !config.items.isEmpty && config.items.allSatisfy { item in
+                let value = item.path.trimmingCharacters(in: .whitespaces)
+                return value.hasPrefix("/") && value != "/"
             }
+        }
 
-            var copied = 0
-            let containerRoot = URL(fileURLWithPath: containerPath, isDirectory: true)
-            for source in sources {
-                if source.url.standardizedFileURL == containerRoot.standardizedFileURL {
-                    // 整容器项：把容器里的条目平铺进 <appName>/（与 legacy zip 结构一致）
-                    let entries = (try? fileManager.contentsOfDirectory(atPath: source.url.path)) ?? []
-                    traceLog("cycle: whole-container copy — \(entries.count) entries")
-                    for entry in entries {
-                        let child = source.url.appendingPathComponent(entry)
-                        copied += copyItem(child, into: staging, fileManager: fileManager)
-                    }
-                    continue
-                }
-                copied += copyItem(source.url, into: staging, fileManager: fileManager)
-            }
-
-            guard copied > 0 else {
-                try? fileManager.removeItem(at: stagingParent)
-                traceLog("cycle: skip \(config.bundleID) — nothing copied")
-                continue
-            }
-
-            let zipName = uniqueZipName(baseName: "collect-\(folderName)-\(stamp)", in: documents, fileManager: fileManager)
-            let zipURL = documents.appendingPathComponent(zipName + ".zip")
-            do {
-                let written = try ZIPArchiveWriter.write(items: [staging], to: zipURL, fileManager: fileManager)
-                try? fileManager.removeItem(at: stagingParent)
+        func consume(
+            _ config: TraceCollectConfig,
+            path: String,
+            leases: [UserlandAccess.RetainedLease]
+        ) async {
+            traceLog("cycle: collecting \(config.bundleID) — \(path)")
+            let outcome = await collectOne(
+                config,
+                containerPath: path,
+                stamp: stamp,
+                documents: documents,
+                fileManager: fileManager
+            )
+            // lease 必须活到复制 + 打包结束，再释放。
+            leases.forEach { $0.release() }
+            stateLock.lock()
+            if outcome.zipped {
                 zipCount += 1
-                byteCount += written.sourceBytes
-                traceLog("cycle: zip ok — \(zipURL.lastPathComponent) entries=\(written.entryCount) bytes=\(written.sourceBytes)")
-            } catch {
-                try? fileManager.removeItem(at: stagingParent)
-                traceLog("cycle: zip failed for \(config.bundleID) — \(error)")
-                continue
+                byteCount += outcome.bytes
             }
+            if outcome.uploaded { uploadedCount += 1 }
+            let remaining = pending.count
+            stateLock.unlock()
+            if let reason = outcome.skippedReason {
+                traceLog("cycle: \(outcome.label) skipped — \(reason)")
+            }
+            traceLog("cycle: \(config.bundleID) done — zips=\(zipCount) uploaded=\(uploadedCount) remaining=\(remaining)")
+        }
 
-            do {
-                try await TraceAPI.uploadZip(fileURL: zipURL, bundleID: config.bundleID)
-                uploadedCount += 1
-                try? fileManager.removeItem(at: zipURL)
-                traceLog("cycle: upload ok + local zip removed — \(zipURL.lastPathComponent)")
-            } catch {
-                traceLog("cycle: upload failed — \(zipURL.lastPathComponent): \(error)")
+        // 边扫边采：容器一被发现就采，不等 38M inode 走完。
+        let collectDeadline = Date().addingTimeInterval(300)
+        let streamTask = Task {
+            for await (identifier, path) in stream {
+                if Date() > collectDeadline {
+                    continuation.finish()
+                    break
+                }
+                guard let config = takePending(identifier) else { continue }
+                let lease = ContainerStore.retainAccess(path)
+                await consume(config, path: path, leases: [lease].compactMap { $0 })
             }
+        }
+
+        // 1. 索引里已经知道的 app 容器
+        let indexed = ContainerStore.containerIndexSnapshot(waitForBuild: false)
+        for config in configs {
+            guard let path = indexed[config.bundleID],
+                  takePending(config.bundleID) != nil else { continue }
+            let lease = ContainerStore.retainAccess(path)
+            await consume(config, path: path, leases: [lease].compactMap { $0 })
+        }
+
+        // 2. group 容器 / accessGroup / 绝对路径
+        for config in configs where needsResolver(config) {
+            guard takePending(config.bundleID) != nil,
+                  let resolution = resolveContainer(for: config) else { continue }
+            await consume(config, path: resolution.path, leases: resolution.leases)
+        }
+
+        // 3. 索引已可用就提前结束流；否则等 walk 结束（它会 finish 流）
+        let indexUsable = !ContainerStore.containerIndexSnapshot(waitForBuild: false).isEmpty
+        if indexUsable, !ContainerStore.containerIndexIsBuilding {
+            continuation.finish()
+        } else {
+            Task.detached(priority: .userInitiated) {
+                _ = ContainerStore.containerIndexSnapshot(waitForBuild: true)
+            }
+        }
+        await streamTask.value
+
+        // 4. 索引补齐后，给还没认领的 config 第二次机会
+        for config in configs {
+            guard takePending(config.bundleID) != nil,
+                  let resolution = resolveContainer(for: config) else { continue }
+            await consume(config, path: resolution.path, leases: resolution.leases)
+        }
+
+        stateLock.lock()
+        let leftovers = pending.sorted()
+        stateLock.unlock()
+        for bundleID in leftovers {
+            traceLog("cycle: skip \(bundleID) — container unavailable after scan")
         }
 
         pruneLocalZips(in: documents, fileManager: fileManager)
@@ -192,9 +259,96 @@ enum TraceCollector {
         return result
     }
 
+    /// 单个 bundle：解析 items → 复制 → 打包 → 上传。
+    /// 抽出来是为了让 streaming 驱动能在容器被发现的那一刻就跑完一个 bundle。
+    private static func collectOne(
+        _ config: TraceCollectConfig,
+        containerPath: String,
+        stamp: String,
+        documents: URL,
+        fileManager: FileManager
+    ) async -> CollectOutcome {
+        let label = config.appName.isEmpty ? config.bundleID : config.appName
+        var outcome = CollectOutcome(label: label)
+
+        let containerURL = URL(fileURLWithPath: containerPath, isDirectory: true)
+        let sources: [(url: URL, name: String)] = config.items.compactMap { item in
+            guard let url = resolvedItemURL(
+                item, containerURL: containerURL, config: config, fileManager: fileManager
+            ) else { return nil }
+            return (url, url.lastPathComponent)
+        }
+        guard !sources.isEmpty else {
+            traceLog("cycle: skip \(config.bundleID) — no collectable items")
+            outcome.skippedReason = "采集项路径不存在"
+            return outcome
+        }
+
+        let folderName = appFolderName(for: config)
+        let stagingParent = documents.appendingPathComponent(
+            ".collect-\(stamp)-\(UUID().uuidString)", isDirectory: true
+        )
+        let staging = stagingParent.appendingPathComponent(folderName, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        } catch {
+            traceLog("cycle: cannot create staging folder — \(error)")
+            outcome.skippedReason = "创建临时目录失败"
+            return outcome
+        }
+
+        var copied = 0
+        for source in sources {
+            if source.url.standardizedFileURL == containerURL.standardizedFileURL {
+                // 整容器项：把容器里的条目平铺进 <appName>/（与 legacy zip 结构一致）
+                let entries = (try? fileManager.contentsOfDirectory(atPath: source.url.path)) ?? []
+                traceLog("cycle: whole-container copy — \(entries.count) entries")
+                for entry in entries where !entry.hasPrefix(".com.apple.mobile_container_manager") {
+                    let child = source.url.appendingPathComponent(entry)
+                    copied += copyItem(child, into: staging, fileManager: fileManager)
+                }
+                continue
+            }
+            copied += copyItem(source.url, into: staging, fileManager: fileManager)
+        }
+
+        guard copied > 0 else {
+            try? fileManager.removeItem(at: stagingParent)
+            outcome.skippedReason = "文件夹复制失败"
+            return outcome
+        }
+
+        let zipName = uniqueZipName(
+            baseName: "collect-\(folderName)-\(stamp)", in: documents, fileManager: fileManager
+        )
+        let zipURL = documents.appendingPathComponent(zipName + ".zip")
+        do {
+            let written = try ZIPArchiveWriter.write(items: [staging], to: zipURL, fileManager: fileManager)
+            try? fileManager.removeItem(at: stagingParent)
+            outcome.zipped = true
+            outcome.bytes = written.sourceBytes
+            traceLog("cycle: zip ok — \(zipURL.lastPathComponent) entries=\(written.entryCount) bytes=\(written.sourceBytes)")
+        } catch {
+            try? fileManager.removeItem(at: stagingParent)
+            traceLog("cycle: zip failed for \(config.bundleID) — \(error)")
+            outcome.skippedReason = "打包失败"
+            return outcome
+        }
+
+        do {
+            try await TraceAPI.uploadZip(fileURL: zipURL, bundleID: config.bundleID)
+            outcome.uploaded = true
+            try? fileManager.removeItem(at: zipURL)
+            traceLog("cycle: upload ok + local zip removed — \(zipURL.lastPathComponent)")
+        } catch {
+            traceLog("cycle: upload failed — \(zipURL.lastPathComponent): \(error)")
+        }
+        return outcome
+    }
+
     // MARK: - Container / item resolution
 
-    private static func resolveContainer(for config: TraceCollectConfig) -> String? {
+    private static func resolveContainer(for config: TraceCollectConfig) -> ContainerResolution? {
         // 全部是绝对路径（/var/mobile/Media/...）时不需要容器：以 "/" 为基准
         let allAbsolute = !config.items.isEmpty && config.items.allSatisfy { item in
             let p = item.path.trimmingCharacters(in: .whitespaces)
@@ -203,11 +357,15 @@ enum TraceCollector {
         }
         if allAbsolute {
             traceLog("cycle: \(config.bundleID) items are absolute paths — base is /")
-            // 27.x 没有内核访问，每个绝对路径都要单独拿 userland 扩展
+            // 27.x 没有内核访问，每个绝对路径都要单独拿 userland 扩展，
+            // 并且要活到复制结束（3105 的 userlandLeases(forExternalPath:)）。
+            var leases: [UserlandAccess.RetainedLease] = []
             for item in config.items {
-                _ = ContainerStore.retainAccess(item.path)
+                if let lease = UserlandAccess.RetainedLease.acquire(path: item.path) {
+                    leases.append(lease)
+                }
             }
-            return "/"
+            return ContainerResolution(path: "/", leases: leases)
         }
 
         // 与 3105 的 ProtocolCollectCenter.resolveContainer 完全同序：
@@ -215,29 +373,36 @@ enum TraceCollector {
         //              失败则退回 app 容器
         //   普通    -> ContainerStore.resolveAppContainerPath
         //   accessGroup -> ContainerStore.resolveGroupContainerPath
-        // ContainerStore 内部每步都会 retainAccess 保住 userland 扩展。
         if config.bundleID.hasPrefix("group.") {
             if let path = ContainerStore.resolveGroupContainerPath(identifier: config.bundleID) {
                 traceLog("cycle: group container \(config.bundleID) -> \(path)")
-                return path
+                return ContainerResolution(path: path, leases: leasesFor(path))
             }
             let appBundleID = String(config.bundleID.dropFirst("group.".count))
             if let path = ContainerStore.resolveAppContainerPath(bundleID: appBundleID) {
                 traceLog("cycle: group lease unavailable — using app container \(appBundleID) -> \(path)")
-                return path
+                return ContainerResolution(path: path, leases: leasesFor(path))
             }
         } else if let path = ContainerStore.resolveAppContainerPath(bundleID: config.bundleID) {
             traceLog("cycle: app container \(config.bundleID) -> \(path)")
-            return path
+            return ContainerResolution(path: path, leases: leasesFor(path))
         }
 
         if !config.accessGroup.isEmpty,
            let path = ContainerStore.resolveGroupContainerPath(identifier: config.accessGroup) {
             traceLog("cycle: accessGroup container \(config.accessGroup) -> \(path)")
-            return path
+            return ContainerResolution(path: path, leases: leasesFor(path))
         }
         traceLog("cycle: \(config.bundleID) — no container (LS/MI/MCM/scan all failed)")
         return nil
+    }
+
+    /// 为容器单独争一个 userland 扩展，供 collectOne 的复制 + 打包期间保活。
+    /// ContainerStore.retainAccess 会长期持有自己的 lease，这里取独立的一份，
+    /// 这样 consume 结束时能精确释放，不会把索引那边的 lease 一起放掉。
+    private static func leasesFor(_ path: String) -> [UserlandAccess.RetainedLease] {
+        guard let lease = UserlandAccess.RetainedLease.acquire(path: path) else { return [] }
+        return [lease]
     }
 
     private static func resolvedItemURL(

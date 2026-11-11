@@ -118,7 +118,13 @@ enum UserlandAccess {
         // Every candidate must exist for real: a path that only *looks* grantable
         // (27.0.1's /var/containers/Data/Application) hands back a token for a
         // dangling symlink and reports success while nothing is reachable.
-        let candidates = probeTargets()
+        // 3105 的做法：把一个真实容器插到候选最前面。27.x 上目录 root 一律 -6，
+        // 只有容器目录能拿到 token（log2_86: mapped=5 grants=5 refused=0），
+        // 所以拿 root 探测只会得到假阴性 —— probe 失败会连带否掉整条文件系统路。
+        var candidates = probeTargets()
+        if let indexed = ContainerStore.containerIndexSnapshot().values.first {
+            candidates.insert(indexed, at: 0)
+        }
         for candidate in candidates {
             let handle = grant(candidate, createIfMissing: false)
             if handle >= 0 {
