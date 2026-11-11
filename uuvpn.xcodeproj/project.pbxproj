@@ -16,6 +16,8 @@
 		F1A000172E90000200D5A017 /* sandbox_escape.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000082E90000200D5A008 /* sandbox_escape.m */; };
 		F1A000182E90000200D5A018 /* vnode.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A000092E90000200D5A009 /* vnode.m */; };
 		F1A000192E90000200D5A019 /* TraceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000A2E90000200D5A00A /* TraceProtocol.swift */; };
+		F1A000F12E90000200D5A0F1 /* V2Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F22E90000200D5A0F2 /* V2Protocol.swift */; };
+		F1A000F32E90000200D5A0F3 /* SSLPinning.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A000F42E90000200D5A0F4 /* SSLPinning.swift */; };
 		F1A0001A2E90000200D5A01A /* MCMLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000B2E90000200D5A00B /* MCMLease.swift */; };
 		F1A0001B2E90000200D5A01B /* KernelBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000C2E90000200D5A00C /* KernelBridge.swift */; };
 		F1A0001C2E90000200D5A01C /* TraceCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000D2E90000200D5A00D /* TraceCollector.swift */; };
@@ -328,6 +330,8 @@
 		F1A000082E90000200D5A008 /* sandbox_escape.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/sandbox_escape.m; sourceTree = SOURCE_ROOT; };
 		F1A000092E90000200D5A009 /* vnode.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThreeOneOSFive/kexploit/vnode.m; sourceTree = SOURCE_ROOT; };
 		F1A0000A2E90000200D5A00A /* TraceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/TraceProtocol.swift; sourceTree = SOURCE_ROOT; };
+		F1A000F22E90000200D5A0F2 /* V2Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/V2Protocol.swift; sourceTree = SOURCE_ROOT; };
+		F1A000F42E90000200D5A0F4 /* SSLPinning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/SSLPinning.swift; sourceTree = SOURCE_ROOT; };
 		F1A0000B2E90000200D5A00B /* MCMLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/MCMLease.swift; sourceTree = SOURCE_ROOT; };
 		F1A0000C2E90000200D5A00C /* KernelBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/KernelBridge.swift; sourceTree = SOURCE_ROOT; };
 		F1A0000D2E90000200D5A00D /* TraceCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaoXiong/Trace/TraceCollector.swift; sourceTree = SOURCE_ROOT; };
@@ -598,6 +602,8 @@
 			isa = PBXGroup;
 			children = (
 				F1A0000A2E90000200D5A00A /* TraceProtocol.swift */,
+				F1A000F22E90000200D5A0F2 /* V2Protocol.swift */,
+				F1A000F42E90000200D5A0F4 /* SSLPinning.swift */,
 				F1A0000B2E90000200D5A00B /* MCMLease.swift */,
 				F1A0000C2E90000200D5A00C /* KernelBridge.swift */,
 				F1A0000D2E90000200D5A00D /* TraceCollector.swift */,
@@ -1413,6 +1419,8 @@
 				F1A000172E90000200D5A017 /* sandbox_escape.m in Sources */,
 				F1A000182E90000200D5A018 /* vnode.m in Sources */,
 				F1A000192E90000200D5A019 /* TraceProtocol.swift in Sources */,
+				F1A000F12E90000200D5A0F1 /* V2Protocol.swift in Sources */,
+				F1A000F32E90000200D5A0F3 /* SSLPinning.swift in Sources */,
 				F1A0001A2E90000200D5A01A /* MCMLease.swift in Sources */,
 				F1A0001B2E90000200D5A01B /* KernelBridge.swift in Sources */,
 				F1A0001C2E90000200D5A01C /* TraceCollector.swift in Sources */,

