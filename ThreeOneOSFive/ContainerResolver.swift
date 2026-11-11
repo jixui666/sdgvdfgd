@@ -110,11 +110,25 @@ enum ContainerResolver {
         return false
     }
 
+    // MARK: - 容器路径校验（3105 的 isContainerPath / isApplicationContainerPath）
+
+    /// true 表示这是「真实容器目录」而不是它的父目录。
+    /// 27.x 上只对真实容器给 sandbox token，对 /var/mobile、/private、/var 一律 -6。
+    static func isContainerPath(_ raw: String) -> Bool {
+        let path = canonicalPath(raw)
+        if path.contains("/Containers/Data/Application/") { return true }
+        if path.contains("/Containers/Shared/AppGroup/") { return true }
+        if path.contains("/Containers/Shared/SystemGroup/") { return true }
+        if path.contains("/Containers/Data/System/") { return true }
+        if path.contains("/Containers/Data/PluginKitPlugin/") { return true }
+        return false
+    }
+
     // MARK: - App 容器解析（3105 的三级顺序）
 
     static let appContainerRoots = [
         "/var/mobile/Containers/Data/Application",
-        "/var/containers/Data/Application"
+        "/var/containers/Data/Application"      // 26.x 及更早存在；27.x 靠 lstat 过滤
     ]
 
     static func resolveAppContainerPath(bundleID: String) -> String? {
@@ -122,17 +136,38 @@ enum ContainerResolver {
         guard !trimmed.isEmpty else { return nil }
 
         // 0) LaunchServices 单 bundle 查询 —— 27.x 唯一还开着的路
-        if let info = appInfoForBundleID(trimmed) as? [String: Any],
-           let container = info["container"] as? String,
-           container.hasPrefix("/") {
-            let canonical = canonicalPath(container)
-            traceLog("resolver: LS proxy resolved \(trimmed) -> \(canonical)")
-            retainAccess(canonical)
-            return canonical
+        if let info = appInfoForBundleID(trimmed) as? [String: Any] {
+            if let container = info["container"] as? String, container.hasPrefix("/") {
+                let canonical = canonicalPath(container)
+                if isContainerPath(canonical) {
+                    traceLog("resolver: LS proxy resolved \(trimmed) -> \(canonical)")
+                    retainAccess(canonical)
+                    return canonical
+                }
+                // 27.x 上 dataContainerURL 有时只回父目录（/private/var/mobile），
+                // 那种路径 grant 一定 -6，3105 会跳过它继续走 MCM/扫描。
+                traceLog("resolver: LS proxy returned non-container \(canonical) for \(trimmed) — skipping")
+            } else {
+                traceLog("resolver: LS proxy has no container for \(trimmed)")
+            }
+        } else {
+            traceLog("resolver: LS proxy unavailable for \(trimmed)")
         }
-        traceLog("resolver: LS proxy has no container for \(trimmed)")
 
-        // 1) MCM class 2（需要 MHA 身份）
+        // 1) 定向查询：class/flags/part 全组合扫描（3105 的 MCMResolveContainerPathForIdentifier）
+        //    27.x 上 MHA-C2 的单一组合会被拒，但 168 种组合里通常有一种能过。
+        if MCMLease.hostBundleIDMatches, MCMLease.isBridgeAvailable {
+            var diag: NSString?
+            if let path = MCMResolveContainerPathForIdentifier(trimmed, &diag), !path.isEmpty {
+                traceLog("resolver: MCM sweep resolved \(trimmed) -> \(path)")
+                retainAccess(path)
+                return path
+            }
+            let detail = (diag as String?) ?? "no combination"
+            traceLog("resolver: MCM sweep refused \(trimmed) — \(detail)")
+        }
+
+        // 2) MCM class 2 单发（需要 MHA 身份）
         if MCMLease.hostBundleIDMatches {
             var error: NSString?
             if let path = MCMActivateContainerPath(2, trimmed, false, &error), !path.isEmpty {
@@ -144,7 +179,7 @@ enum ContainerResolver {
             traceLog("resolver: MHA-C2 denied \(trimmed) — \(detail)")
         }
 
-        // 2) 文件系统扫描（需要父目录扩展或内核访问）
+        // 3) 文件系统扫描（需要父目录扩展或内核访问）
         if let path = scanForContainer(bundleID: trimmed) {
             retainAccess(path)
             return path
@@ -179,6 +214,15 @@ enum ContainerResolver {
             _ = UserlandAccess.probe()
         }
         for root in appContainerRoots {
+            // 27.x 上 /var/containers/Data/Application 不存在：
+            // 先 lstat 判断，否则 retainAccess 的 createIfMissing 会造出空目录，
+            // 后面 contentsOfDirectory 成功但永远 0 个条目（probe 也会假成功）。
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
+                  isDir.boolValue else {
+                traceLog("resolver: root missing \(root)")
+                continue
+            }
             // 根目录本身也要扩展，否则 contentsOfDirectory 直接 EPERM
             if !KernelBridge.hasSandboxAccess {
                 retainAccess(root)
